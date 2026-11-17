@@ -331,7 +331,7 @@ type Event struct {
 - 接口：`EventBus`（`Publish / Subscribe / Close`）
 - 默认实现：进程内总线（单机/单实例模式）；跨实例：Redis Pub/Sub 适配器（channel 按 namespace 分）
 - 订阅方收到 `Updated/Invalidated` 后**删除** L1 对应条目，不回源；事件**不带 value 载荷**（大值不经 Pub/Sub，与轻量定位一致，删除后下次读走 L2 即新值）；收到 `GenerationBumped` 后整代 L1 清空
-- 发起 `InvalidateAll` 的实例不依赖自身事件：`INCR` 成功后同步清空自身 L1 并更新本地世代号（`Instance` 过滤仅作用于 `Updated/Invalidated`）
+- 发起 `InvalidateAll` 的实例不依赖自身事件：`INCR` 成功后同步清空自身 L1 并更新本地世代号；`Instance` 过滤作用于全部事件类型（发起实例均已同步处理自身状态，处理自身事件只会造成冗余操作）
 - MQ 适配器（Kafka/NATS 等）后续以同一接口接入，业务零改动
 - 事件保证 at-most-once，L1 一致性定位为"最终、秒级"，不承诺强一致
 
