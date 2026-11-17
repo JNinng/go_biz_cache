@@ -129,8 +129,8 @@ func resolveSerializer(s Serializer) Serializer {
 }
 
 // sliceRange redis LRANGE 语义切片（负索引、闭区间，越界收敛）。
-func sliceRange[T any](items []T, start, stop int) []T {
-	n := len(items)
+func sliceRange[T any](items []T, start, stop int64) []T {
+	n := int64(len(items))
 	if start < 0 {
 		start += n
 		if start < 0 {
