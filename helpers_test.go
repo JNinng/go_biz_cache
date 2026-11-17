@@ -63,7 +63,7 @@ func (s *recStore) recordedTTLs() []time.Duration {
 	return append([]time.Duration(nil), s.setTTLs...)
 }
 
-// flakyStore 可切换故障的 Store（降级策略测试用）。
+// flakyStore 可切换故障的 Store（降级策略测试用）：fail=true 时全部读操作报错。
 type flakyStore struct {
 	l2.Store
 	fail atomic.Bool
@@ -71,25 +71,112 @@ type flakyStore struct {
 
 func newFlakyStore() *flakyStore { return &flakyStore{Store: l2.NewMemStore()} }
 
+func (s *flakyStore) boom() error { return context.DeadlineExceeded }
+
 func (s *flakyStore) Get(ctx context.Context, key string) ([]byte, error) {
 	if s.fail.Load() {
-		return nil, context.DeadlineExceeded
+		return nil, s.boom()
 	}
 	return s.Store.Get(ctx, key)
 }
 
 func (s *flakyStore) MGet(ctx context.Context, keys ...string) (map[string][]byte, error) {
 	if s.fail.Load() {
-		return nil, context.DeadlineExceeded
+		return nil, s.boom()
 	}
 	return s.Store.MGet(ctx, keys...)
 }
 
 func (s *flakyStore) MSet(ctx context.Context, ttl time.Duration, items map[string][]byte) error {
 	if s.fail.Load() {
-		return context.DeadlineExceeded
+		return s.boom()
 	}
 	return s.Store.MSet(ctx, ttl, items)
+}
+
+func (s *flakyStore) HGet(ctx context.Context, key, field string) ([]byte, error) {
+	if s.fail.Load() {
+		return nil, s.boom()
+	}
+	return s.Store.HGet(ctx, key, field)
+}
+
+func (s *flakyStore) HMGet(ctx context.Context, key string, fields ...string) (map[string][]byte, error) {
+	if s.fail.Load() {
+		return nil, s.boom()
+	}
+	return s.Store.HMGet(ctx, key, fields...)
+}
+
+func (s *flakyStore) HGetAll(ctx context.Context, key string) (map[string][]byte, error) {
+	if s.fail.Load() {
+		return nil, s.boom()
+	}
+	return s.Store.HGetAll(ctx, key)
+}
+
+func (s *flakyStore) HGetAllBatch(ctx context.Context, keys ...string) (map[string]map[string][]byte, error) {
+	if s.fail.Load() {
+		return nil, s.boom()
+	}
+	return s.Store.HGetAllBatch(ctx, keys...)
+}
+
+func (s *flakyStore) SMembers(ctx context.Context, key string) ([][]byte, error) {
+	if s.fail.Load() {
+		return nil, s.boom()
+	}
+	return s.Store.SMembers(ctx, key)
+}
+
+func (s *flakyStore) SMembersBatch(ctx context.Context, keys ...string) (map[string][][]byte, error) {
+	if s.fail.Load() {
+		return nil, s.boom()
+	}
+	return s.Store.SMembersBatch(ctx, keys...)
+}
+
+func (s *flakyStore) LRange(ctx context.Context, key string, start, stop int64) ([][]byte, error) {
+	if s.fail.Load() {
+		return nil, s.boom()
+	}
+	return s.Store.LRange(ctx, key, start, stop)
+}
+
+func (s *flakyStore) LLen(ctx context.Context, key string) (int64, error) {
+	if s.fail.Load() {
+		return 0, s.boom()
+	}
+	return s.Store.LLen(ctx, key)
+}
+
+func (s *flakyStore) ZRangeWithScores(ctx context.Context, key string, start, stop int64) ([]Z, error) {
+	if s.fail.Load() {
+		return nil, s.boom()
+	}
+	return s.Store.ZRangeWithScores(ctx, key, start, stop)
+}
+
+func (s *flakyStore) ZCard(ctx context.Context, key string) (int64, error) {
+	if s.fail.Load() {
+		return 0, s.boom()
+	}
+	return s.Store.ZCard(ctx, key)
+}
+
+// countingStore 记录 Get 次数且可切换故障（世代号刷新摊销/退避测试用）。
+type countingStore struct {
+	l2.Store
+	gets atomic.Int32
+	fail atomic.Bool
+}
+
+func (s *countingStore) Get(ctx context.Context, key string) ([]byte, error) {
+	s.gets.Add(1)
+	if s.fail.Load() {
+		return nil, context.DeadlineExceeded
+	}
+	return s.Store.Get(ctx, key)
 }
 
 // countingLoader 计数 Loader（记录每次调用的 key 集合）。

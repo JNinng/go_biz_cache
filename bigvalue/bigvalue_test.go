@@ -57,6 +57,10 @@ func TestCompressThreshold(t *testing.T) {
 	if err != nil || got != nil {
 		t.Fatalf("Decompress(nil) = %v,%v", got, err)
 	}
+	// 未知标记头 = 数据损坏 → 报错（调用方走脏数据自愈）
+	if _, err = Decompress(append([]byte{0xFF}, small...)); err == nil {
+		t.Fatal("unknown header must error")
+	}
 }
 
 func TestSplitEven(t *testing.T) {
