@@ -301,45 +301,69 @@ func inverseTag(op TagOp, physical string) (string, bool) {
 
 // ---------- 世代号（§3.2 D2）----------
 
-const genRefreshTTL = 5 * time.Second // 世代号本地缓存短 TTL（事件丢失时的惰性刷新兜底）
+// 世代号本地缓存 TTL 与刷新策略（var 仅供测试缩短）：
+// 刷新读取带独立短超时并做失败退避，Redis 故障期沿用旧世代号、不阻塞读路径（§3.2）。
+var (
+	genRefreshTTL  = 5 * time.Second        // 世代号本地缓存 TTL（事件丢失时的惰性刷新兜底）
+	genFailBackoff = 1 * time.Second        // 刷新失败后的重试退避（期间不逐读打 Redis）
+	genReadTimeout = 500 * time.Millisecond // 元 key 单次读取超时上限
+)
 
 // genTracker 世代号管理：存储于 Redis 元 key {ns}:{name}:__gen，进程内短 TTL 缓存摊销读取。
 // 本地模式（无 L2）世代号存进程内存，重启归零等价全量失效。
 type genTracker struct {
-	mu      sync.RWMutex
-	gen     int64
-	expires time.Time
-	metaKey string
-	store   l2.Store // nil = 本地模式
-	logger  Logger
+	mu        sync.RWMutex
+	gen       int64
+	expires   time.Time
+	failUntil time.Time // 刷新失败退避截止；期间直接沿用旧世代号
+	metaKey   string
+	store     l2.Store // nil = 本地模式
+	logger    Logger
 }
 
 func newGenTracker(metaKey string, store l2.Store, logger Logger) *genTracker {
 	return &genTracker{metaKey: metaKey, store: store, logger: logger}
 }
 
-// current 当前世代号。Redis 不可用时沿用最后已知世代号，不阻塞读取。
+// current 当前世代号。刷新读取带独立短超时；失败进入退避（期间沿用旧世代号），不阻塞读路径。
 func (g *genTracker) current(ctx context.Context) int64 {
 	now := time.Now()
 	g.mu.RLock()
-	gen, valid := g.gen, now.Before(g.expires)
+	gen, valid, failing := g.gen, now.Before(g.expires), now.Before(g.failUntil)
 	g.mu.RUnlock()
-	if valid {
+	if valid || failing {
 		return gen
 	}
 	if g.store == nil { // 本地模式
 		return gen
 	}
-	val, err := g.store.Get(ctx, g.metaKey)
+	gctx, cancel := context.WithTimeout(ctx, genReadTimeout)
+	val, err := g.store.Get(gctx, g.metaKey)
+	cancel()
 	if err != nil {
-		if !errors.Is(err, l2.ErrNotFound) && g.logger != nil {
+		if errors.Is(err, l2.ErrNotFound) {
+			// 元 key 尚未创建（从未 INCR）等价世代号 0：按刷新成功缓存摊销，不进入退避；
+			// 若已有世代号而元 key 消失（数据异常）则按失败退避，沿用旧世代号
+			g.mu.Lock()
+			if g.gen == 0 {
+				g.gen, g.expires = 0, now.Add(genRefreshTTL)
+			} else {
+				g.failUntil = now.Add(genFailBackoff)
+			}
+			g.mu.Unlock()
+			return gen
+		}
+		g.mu.Lock()
+		g.failUntil = now.Add(genFailBackoff)
+		g.mu.Unlock()
+		if g.logger != nil {
 			g.logger.Warnf("gocache: read generation %s: %v (stale gen %d used)", g.metaKey, err, gen)
 		}
 		return gen // 兜底：沿用最后已知世代号
 	}
 	n, _ := strconv.ParseInt(string(val), 10, 64)
 	g.mu.Lock()
-	g.gen, g.expires = n, time.Now().Add(genRefreshTTL)
+	g.gen, g.expires = n, now.Add(genRefreshTTL)
 	g.mu.Unlock()
 	return n
 }

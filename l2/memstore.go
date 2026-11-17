@@ -128,7 +128,12 @@ func (m *MemStore) Incr(ctx context.Context, key string) (int64, error) {
 	cur, expire := int64(0), int64(0)
 	if v, ok := m.getStr(key); ok {
 		expire = v.expireAt
-		cur, _ = strconv.ParseInt(string(v.data), 10, 64)
+		var perr error
+		cur, perr = strconv.ParseInt(string(v.data), 10, 64)
+		if perr != nil {
+			// 语义对齐 redis WRONGTYPE：非整数值不可递增
+			return 0, errNotNumber
+		}
 	}
 	cur++
 	m.strings[key] = memVal{data: []byte(strconv.FormatInt(cur, 10)), expireAt: expire}
@@ -315,7 +320,7 @@ func (m *MemStore) LRange(ctx context.Context, key string, start, stop int64) ([
 	}
 	items := l.items
 	m.mu.Unlock()
-	s, e, okr := normalizeRange(int(start), int(stop), len(items))
+	s, e, okr := normalizeRange(start, stop, int64(len(items)))
 	if !okr {
 		return nil, nil
 	}
@@ -376,17 +381,17 @@ func (m *MemStore) LTrim(ctx context.Context, key string, start, stop int64) err
 	if !ok {
 		return nil
 	}
-	s, e, okr := normalizeRange(int(start), int(stop), len(l.items))
+	s, e, okr := normalizeRange(start, stop, int64(len(l.items)))
 	if !okr {
 		l.items = nil
 	} else {
-		l.items = append([][]byte{}, l.items[s:e+1]...)
+		l.items = append([][]byte{}, l.items[int(s):int(e)+1]...)
 	}
 	return nil
 }
 
 // normalizeRange redis LRANGE 语义：负索引、闭区间；第三返回值表示是否非空。
-func normalizeRange(start, stop, n int) (int, int, bool) {
+func normalizeRange(start, stop, n int64) (int64, int64, bool) {
 	if start < 0 {
 		start += n
 		if start < 0 {
@@ -501,14 +506,17 @@ func (m *MemStore) ZRangeWithScores(ctx context.Context, key string, start, stop
 	if !ok {
 		return nil, nil
 	}
-	s, e, okr := normalizeRange(int(start), int(stop), len(zs))
+	s, e, okr := normalizeRange(start, stop, int64(len(zs)))
 	if !okr {
 		return nil, nil
 	}
-	return zs[s : e+1], nil
+	return zs[int(s) : int(e)+1], nil
 }
 
 var errBadBound = errors.New("l2: bad zrangebyscore bound")
+
+// errNotNumber 语义对齐 redis WRONGTYPE：对非整数值执行 INCR。
+var errNotNumber = errors.New("l2: value is not a number")
 
 // parseZBound 解析 ZRANGEBYSCORE 边界：-inf/+inf、"(x" 开区间、"x" 闭区间。
 func parseZBound(s string) (float64, bool, bool, error) {
@@ -578,4 +586,48 @@ func (m *MemStore) ZRangeByScoreWithScores(ctx context.Context, key string, by Z
 		out = out[:by.Count]
 	}
 	return out, nil
+}
+
+// ---------- 批量（FieldShard 子 key 合并；内存实现逐 key 执行，语义与单 key 一致）----------
+
+func (m *MemStore) HGetAllBatch(ctx context.Context, keys ...string) (map[string]map[string][]byte, error) {
+	out := make(map[string]map[string][]byte, len(keys))
+	for _, k := range keys {
+		fm, err := m.HGetAll(ctx, k)
+		if err != nil {
+			return nil, err
+		}
+		out[k] = fm
+	}
+	return out, nil
+}
+
+func (m *MemStore) SMembersBatch(ctx context.Context, keys ...string) (map[string][][]byte, error) {
+	out := make(map[string][][]byte, len(keys))
+	for _, k := range keys {
+		ms, err := m.SMembers(ctx, k)
+		if err != nil {
+			return nil, err
+		}
+		out[k] = ms
+	}
+	return out, nil
+}
+
+func (m *MemStore) HMSetBatch(ctx context.Context, ttl time.Duration, refresh bool, items map[string]map[string][]byte) error {
+	for k, fields := range items {
+		if err := m.HMSet(ctx, k, fields, ttl, refresh); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *MemStore) SAddBatch(ctx context.Context, ttl time.Duration, items map[string][][]byte) error {
+	for k, members := range items {
+		if err := m.SAdd(ctx, k, ttl, members...); err != nil {
+			return err
+		}
+	}
+	return nil
 }

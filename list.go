@@ -154,16 +154,20 @@ func (h *TypedListCache[K, V]) Range(ctx context.Context, key K, start, stop int
 	if err != nil {
 		return nil, err
 	}
+	// L1 整列表（解码失败视为脏数据删条目走 L2/回源自愈）
 	if c.l1 != nil {
 		if raw, ok := c.l1.Get(biz); ok {
 			var items []V
-			if err := c.deserialize(h.ser, raw, &items); err != nil {
-				return nil, err
+			if err := c.deserialize(h.ser, raw, &items); err == nil {
+				c.metrics.Hit(LevelL1, c.name)
+				return sliceRange(items, start, stop), nil
+			} else {
+				c.decodeError("l1:"+biz, err)
+				c.l1.Delete(biz)
 			}
-			c.metrics.Hit(LevelL1, c.name)
-			return sliceRange(items, int(start), int(stop)), nil
+		} else {
+			c.metrics.Miss(LevelL1, c.name)
 		}
-		c.metrics.Miss(LevelL1, c.name)
 	}
 	if c.store != nil && c.degrade != DegradeSourceOnly {
 		datas, err := c.store.LRange(ctx, phys, start, stop)
@@ -176,29 +180,38 @@ func (h *TypedListCache[K, V]) Range(ctx context.Context, key K, start, stop int
 		}
 		if len(datas) > 0 {
 			c.metrics.Hit(LevelL2, c.name)
-			return h.decValues(datas)
-		}
-		// 空结果：key 存在（LLEN>0）→ 越界区间为合法空查询，不回源
-		n, err := c.store.LLen(ctx, phys)
-		if err != nil {
-			c.metrics.Error("l2_read", c.name)
-			if c.degrade == DegradeFail {
-				return nil, err
+			items, derr := h.decValues(datas)
+			if derr == nil {
+				return items, nil
 			}
-			return nil, ErrNotFound
+			// 脏数据：清物理 key，走回源自愈重写
+			c.decodeError("l2:"+phys, derr)
+			if serr := c.store.Del(ctx, phys); serr != nil {
+				c.logger.Warnf("gocache: purge corrupt %s for %s:%s: %v", biz, c.ns, c.name, serr)
+			}
+		} else {
+			// 空结果：key 存在（LLEN>0）→ 越界区间为合法空查询，不回源
+			n, err := c.store.LLen(ctx, phys)
+			if err != nil {
+				c.metrics.Error("l2_read", c.name)
+				if c.degrade == DegradeFail {
+					return nil, err
+				}
+				return nil, ErrNotFound
+			}
+			if n > 0 {
+				c.metrics.Hit(LevelL2, c.name)
+				return []V{}, nil
+			}
+			c.metrics.Miss(LevelL2, c.name)
 		}
-		if n > 0 {
-			c.metrics.Hit(LevelL2, c.name)
-			return []V{}, nil
-		}
-		c.metrics.Miss(LevelL2, c.name)
 	}
-	// 空结果视为 key 缺失 → 整 key 回源重建后切片
+	// key 缺失 → 整 key 回源重建后切片
 	items, err := h.rebuild(ctx, key, biz, phys)
 	if err != nil {
 		return nil, err
 	}
-	return sliceRange(items, int(start), int(stop)), nil
+	return sliceRange(items, start, stop), nil
 }
 
 // Len 长度：L1 → L2 LLEN → 空视为缺失整 key 回源重建。
@@ -209,16 +222,20 @@ func (h *TypedListCache[K, V]) Len(ctx context.Context, key K) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	// L1 整列表（解码失败视为脏数据删条目走 L2/回源自愈）
 	if c.l1 != nil {
 		if raw, ok := c.l1.Get(biz); ok {
 			var items []V
-			if err := c.deserialize(h.ser, raw, &items); err != nil {
-				return 0, err
+			if err := c.deserialize(h.ser, raw, &items); err == nil {
+				c.metrics.Hit(LevelL1, c.name)
+				return int64(len(items)), nil
+			} else {
+				c.decodeError("l1:"+biz, err)
+				c.l1.Delete(biz)
 			}
-			c.metrics.Hit(LevelL1, c.name)
-			return int64(len(items)), nil
+		} else {
+			c.metrics.Miss(LevelL1, c.name)
 		}
-		c.metrics.Miss(LevelL1, c.name)
 	}
 	if c.store != nil && c.degrade != DegradeSourceOnly {
 		n, err := c.store.LLen(ctx, phys)
@@ -285,11 +302,8 @@ func (h *TypedListCache[K, V]) rebuild(ctx context.Context, key K, biz, phys str
 		c.metrics.Error("loader", c.name)
 		return nil, err
 	}
-	if len(items) > 0 {
-		c.metrics.Hit(LevelSource, c.name)
-	} else {
-		c.metrics.Miss(LevelSource, c.name)
-	}
+	// 集合语义：loader 成功即命中源（空列表是合法源数据，与"源缺失"不混淆）
+	c.metrics.Hit(LevelSource, c.name)
 	ttl := c.ttlJittered()
 	if c.store != nil {
 		// 回源-整写窗口内并发写可能被重建覆盖，语义 last-write-win（设计 §6）；

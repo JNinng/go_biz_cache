@@ -126,6 +126,12 @@ func (s *ShardedLRU) Set(key string, value []byte, ttl time.Duration) {
 	sh := s.shardOf(key)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
+	// 防御拷贝：调用方可能复用缓冲区，存储后内部状态与外部解耦
+	if len(value) > 0 {
+		cp := make([]byte, len(value))
+		copy(cp, value)
+		value = cp
+	}
 	sh.sets++
 	if sh.sets%sweepInterval == 0 {
 		sh.sweep(time.Now().UnixNano())

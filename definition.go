@@ -121,7 +121,7 @@ type Definition[V any] struct {
 	KeyTemplate   string        // 命名占位符模板，如 "t:{tenant}:u:{uid}"
 	HashTag       TagFunc       // key 变换策略：nil = 不变换（默认整键散列）
 	TTL           time.Duration // 0 = 默认 30m
-	TTLJitter     float64       // ± 比例打散过期时间，防雪崩；建议 ≤ 0.5
+	TTLJitter     float64       // ± 比例打散过期时间，防雪崩；建议 ≤ 0.5；打散后下限钳制为 1s
 	Serializer    Serializer    // nil = JSON
 	NegativeCache bool          // 空值缓存，防穿透
 	NegativeTTL   time.Duration // 负缓存 TTL，默认 10s

@@ -96,16 +96,20 @@ func (h *TypedSetCache[K, M]) Members(ctx context.Context, key K) ([]M, error) {
 	if err != nil {
 		return nil, err
 	}
+	// L1 整集合（解码失败视为脏数据删条目走 L2/回源自愈）
 	if c.l1 != nil {
 		if raw, ok := c.l1.Get(biz); ok {
-			c.metrics.Hit(LevelL1, c.name)
 			var members []M
-			if err := c.deserialize(h.ser, raw, &members); err != nil {
-				return nil, err
+			if err := c.deserialize(h.ser, raw, &members); err == nil {
+				c.metrics.Hit(LevelL1, c.name)
+				return members, nil
+			} else {
+				c.decodeError("l1:"+biz, err)
+				c.l1.Delete(biz)
 			}
-			return members, nil
+		} else {
+			c.metrics.Miss(LevelL1, c.name)
 		}
-		c.metrics.Miss(LevelL1, c.name)
 	}
 	if c.store != nil && c.degrade != DegradeSourceOnly {
 		datas, err := h.sMembers(ctx, phys)
@@ -119,17 +123,22 @@ func (h *TypedSetCache[K, M]) Members(ctx context.Context, key K) ([]M, error) {
 		if len(datas) > 0 {
 			c.metrics.Hit(LevelL2, c.name)
 			members, derr := h.decMembers(datas)
-			if derr != nil {
-				return nil, derr
-			}
-			if c.l1 != nil {
-				if raw, serr := c.serialize(h.ser, members); serr == nil {
-					c.l1.Set(biz, raw, c.ttlJittered())
+			if derr == nil {
+				if c.l1 != nil {
+					if raw, serr := c.serialize(h.ser, members); serr == nil {
+						c.l1.Set(biz, raw, c.ttlJittered())
+					}
 				}
+				return members, nil
 			}
-			return members, nil
+			// 脏数据：清全部子 key，走回源自愈重写
+			c.decodeError("l2:"+phys, derr)
+			if serr := c.store.Del(ctx, h.subkeys(phys)...); serr != nil {
+				c.logger.Warnf("gocache: purge corrupt %s for %s:%s: %v", biz, c.ns, c.name, serr)
+			}
+		} else {
+			c.metrics.Miss(LevelL2, c.name)
 		}
-		c.metrics.Miss(LevelL2, c.name)
 	}
 	// 未缓存 → 整 key 回源重建
 	res, err, shared := h.sf.Do(sfLoadPrefix+biz, func() (loadResult[[]M], error) {
@@ -213,11 +222,9 @@ func (h *TypedSetCache[K, M]) Add(ctx context.Context, key K, members ...M) erro
 	}
 	ttl := c.ttlJittered()
 	if c.store != nil {
-		for sub, datas := range groups {
-			if err := c.store.SAdd(ctx, sub, ttl, datas...); err != nil {
-				c.metrics.Error("l2_write", c.name)
-				return err
-			}
+		if err := c.store.SAddBatch(ctx, ttl, groups); err != nil {
+			c.metrics.Error("l2_write", c.name)
+			return err
 		}
 	}
 	if c.l1 != nil {
@@ -290,18 +297,22 @@ func (h *TypedSetCache[K, M]) InvalidateAll(ctx context.Context) error {
 
 // ---------- 内部路径 ----------
 
-// sMembers 全成员原始值：FieldShard 合并 SMEMBERS×N。
+// sMembers 全成员原始值：SMEMBERS（FieldShard 子 key 经 SMembersBatch 单 pipeline 合并）。
 func (h *TypedSetCache[K, M]) sMembers(ctx context.Context, phys string) ([][]byte, error) {
 	c := h.core
-	if c.big.Type != BigValueFieldShard {
-		return c.store.SMembers(ctx, phys)
+	keys := []string{phys}
+	if c.big.Type == BigValueFieldShard {
+		keys = keys[:0]
+		for i := 0; i < c.big.FieldShard.ShardCount; i++ {
+			keys = append(keys, fieldShardKey(phys, i))
+		}
+	}
+	mm, err := c.store.SMembersBatch(ctx, keys...)
+	if err != nil {
+		return nil, err
 	}
 	var merged [][]byte
-	for i := 0; i < c.big.FieldShard.ShardCount; i++ {
-		datas, err := c.store.SMembers(ctx, fieldShardKey(phys, i))
-		if err != nil {
-			return nil, err
-		}
+	for _, datas := range mm {
 		merged = append(merged, datas...)
 	}
 	return merged, nil
@@ -335,11 +346,8 @@ func (h *TypedSetCache[K, M]) loadAll(ctx context.Context, key K, biz, phys stri
 		c.metrics.Error("loader", c.name)
 		return nil, err
 	}
-	if len(members) > 0 {
-		c.metrics.Hit(LevelSource, c.name)
-	} else {
-		c.metrics.Miss(LevelSource, c.name)
-	}
+	// 集合语义：loader 成功即命中源（空集合是合法源数据，与"源缺失"不混淆）
+	c.metrics.Hit(LevelSource, c.name)
 	ttl := c.ttlJittered()
 	if c.store != nil {
 		// 回源-整写窗口内并发写可能被重建覆盖，语义 last-write-win（设计 §6）；
@@ -360,11 +368,9 @@ func (h *TypedSetCache[K, M]) loadAll(ctx context.Context, key K, biz, phys stri
 				}
 				groups[sub] = append(groups[sub], data)
 			}
-			for sub, datas := range groups {
-				if err := c.store.SAdd(ctx, sub, ttl, datas...); err != nil {
-					c.metrics.Error("l2_write", c.name)
-					c.logger.Warnf("gocache: rebuild write %s for %s:%s: %v", biz, c.ns, c.name, err)
-				}
+			if err := c.store.SAddBatch(ctx, ttl, groups); err != nil {
+				c.metrics.Error("l2_write", c.name)
+				c.logger.Warnf("gocache: rebuild write %s for %s:%s: %v", biz, c.ns, c.name, err)
 			}
 		}
 	}

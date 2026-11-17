@@ -59,6 +59,12 @@ func (c *defCore) decompress(data []byte) ([]byte, error) {
 	return out, nil
 }
 
+// decodeError 脏数据/格式演进的解码失败埋点：删条目由调用方执行，读路径走回源自愈而非报错。
+func (c *defCore) decodeError(where string, err error) {
+	c.metrics.Error("decode", c.name)
+	c.logger.Warnf("gocache: decode %s for %s:%s: %v (self-heal via reload)", where, c.ns, c.name, err)
+}
+
 // checkOversize 单片写入仍超限时报错，不做隐式压缩兜底；超大值写入计入指标。
 func (c *defCore) checkOversize(key string, data []byte) error {
 	if len(data) > maxPhysicalValue {

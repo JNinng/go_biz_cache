@@ -64,7 +64,7 @@ func (h *TypedObjectCache[K, V]) fetch(ctx context.Context, key K, biz string) (
 	if err != nil {
 		return zero, false, err
 	}
-	// L1（nil 值 = 负缓存条目）
+	// L1（nil 值 = 负缓存条目；解码失败视为脏数据删条目走 L2/回源自愈）
 	if c.l1 != nil {
 		if raw, ok := c.l1.Get(biz); ok {
 			if raw == nil {
@@ -72,13 +72,15 @@ func (h *TypedObjectCache[K, V]) fetch(ctx context.Context, key K, biz string) (
 				return zero, false, nil
 			}
 			v, err := h.decodeRaw(raw)
-			if err != nil {
-				return zero, false, err
+			if err == nil {
+				c.metrics.Hit(LevelL1, c.name)
+				return v, true, nil
 			}
-			c.metrics.Hit(LevelL1, c.name)
-			return v, true, nil
+			c.decodeError("l1:"+biz, err)
+			c.l1.Delete(biz)
+		} else {
+			c.metrics.Miss(LevelL1, c.name)
 		}
-		c.metrics.Miss(LevelL1, c.name)
 	}
 	// L2（降级 SourceOnly 跳过读；读失败 Fail 报错 / StaleL1 只认 L1 旧值）
 	if c.store != nil && c.degrade != DegradeSourceOnly {
@@ -99,16 +101,28 @@ func (h *TypedObjectCache[K, V]) fetch(ctx context.Context, key K, biz string) (
 		}
 		if data != nil {
 			raw, v, err := h.decodeCompressed(data)
-			if err != nil {
-				return zero, false, err
+			if err == nil {
+				c.metrics.Hit(LevelL2, c.name)
+				if c.l1 != nil {
+					c.l1.Set(biz, raw, c.ttlJittered())
+				}
+				return v, true, nil
 			}
-			c.metrics.Hit(LevelL2, c.name)
-			if c.l1 != nil {
-				c.l1.Set(biz, raw, c.ttlJittered())
+			c.decodeError("l2:"+phys, err)
+			// 脏数据/格式演进：删物理键与子键，走回源自愈重写
+			dels := []string{phys}
+			if c.big.Type == BigValueShard {
+				dels = dels[:0]
+				for i := 0; i < c.big.Shard.ShardCount; i++ {
+					dels = append(dels, shardKey(phys, i))
+				}
 			}
-			return v, true, nil
+			if derr := c.store.Del(ctx, dels...); derr != nil {
+				c.logger.Warnf("gocache: purge corrupt %s for %s:%s: %v", biz, c.ns, c.name, derr)
+			}
+		} else {
+			c.metrics.Miss(LevelL2, c.name)
 		}
-		c.metrics.Miss(LevelL2, c.name)
 	}
 	// 回源（singleflight 合并同 key 并发）
 	res, err, shared := h.sf.Do(sfLoadPrefix+biz, func() (loadResult[V], error) {
@@ -258,15 +272,16 @@ func (h *TypedObjectCache[K, V]) SetMulti(ctx context.Context, pairs map[K]V) er
 				negs = append(negs, c.negKey(e.phys))
 			}
 		}
-		if err := c.store.MSet(ctx, ttl, items); err != nil {
-			c.metrics.Error("l2_write", c.name)
-			return err
-		}
+		// 先清旧负标记后批量写：中途失败只少缓存，不会留下遮蔽新值的标记
 		if len(negs) > 0 {
 			if err := c.store.Del(ctx, negs...); err != nil {
 				c.metrics.Error("l2_write", c.name)
 				return err
 			}
+		}
+		if err := c.store.MSet(ctx, ttl, items); err != nil {
+			c.metrics.Error("l2_write", c.name)
+			return err
 		}
 	}
 	physKeys := make([]string, 0, len(entries))
@@ -444,7 +459,21 @@ func (h *TypedObjectCache[K, V]) multiReadL2(ctx context.Context, pending []K, o
 		}
 		raw, v, err := h.decodeCompressed(data)
 		if err != nil {
-			return nil, err
+			// 脏数据：删物理键与子键，剩余 keys 交由批量回源自愈
+			c.decodeError("l2:"+phys, err)
+			dels := []string{phys}
+			if c.big.Type == BigValueShard {
+				dels = dels[:0]
+				for i := 0; i < c.big.Shard.ShardCount; i++ {
+					dels = append(dels, shardKey(phys, i))
+				}
+			}
+			if derr := c.store.Del(ctx, dels...); derr != nil {
+				c.logger.Warnf("gocache: purge corrupt %s for %s:%s: %v", biz, c.ns, c.name, derr)
+			}
+			c.metrics.Miss(LevelL2, c.name)
+			rest = append(rest, k)
+			continue
 		}
 		c.metrics.Hit(LevelL2, c.name)
 		out[k] = v
@@ -637,6 +666,13 @@ func (h *TypedObjectCache[K, V]) storeValue(ctx context.Context, biz, phys strin
 	}
 	ttl := c.ttlJittered()
 	if c.store != nil {
+		// 先清旧负标记后写数据：中途失败只少缓存，不会留下遮蔽新值的标记
+		if c.negative {
+			if err := c.store.Del(ctx, c.negKey(phys)); err != nil {
+				c.metrics.Error("l2_write", c.name)
+				return err
+			}
+		}
 		if c.big.Type == BigValueShard {
 			parts, err := c.splitObject(biz, frameShards(data))
 			if err != nil {
@@ -656,12 +692,6 @@ func (h *TypedObjectCache[K, V]) storeValue(ctx context.Context, biz, phys strin
 			}
 		} else {
 			if err := c.store.MSet(ctx, ttl, map[string][]byte{phys: data}); err != nil {
-				c.metrics.Error("l2_write", c.name)
-				return err
-			}
-		}
-		if c.negative {
-			if err := c.store.Del(ctx, c.negKey(phys)); err != nil {
 				c.metrics.Error("l2_write", c.name)
 				return err
 			}

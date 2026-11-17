@@ -440,3 +440,121 @@ func (s *RedisStore) ZRangeByScoreWithScores(ctx context.Context, key string, by
 	}
 	return toZSlice(zs), nil
 }
+
+// ---------- 批量（FieldShard 子 key 合并，单 pipeline）----------
+
+func (s *RedisStore) HGetAllBatch(ctx context.Context, keys ...string) (map[string]map[string][]byte, error) {
+	out := make(map[string]map[string][]byte, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	cctx, c, cancel, err := s.withClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	pipe := c.Pipeline()
+	cmds := make(map[string]*redis.MapStringStringCmd, len(keys))
+	for _, k := range keys {
+		cmds[k] = pipe.HGetAll(cctx, k)
+	}
+	if _, err := pipe.Exec(cctx); err != nil {
+		return nil, err
+	}
+	for k, cmd := range cmds {
+		m, err := cmd.Result()
+		if err != nil {
+			return nil, err
+		}
+		fm := make(map[string][]byte, len(m))
+		for f, v := range m {
+			fm[f] = []byte(v)
+		}
+		out[k] = fm
+	}
+	return out, nil
+}
+
+func (s *RedisStore) SMembersBatch(ctx context.Context, keys ...string) (map[string][][]byte, error) {
+	out := make(map[string][][]byte, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	cctx, c, cancel, err := s.withClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	pipe := c.Pipeline()
+	cmds := make(map[string]*redis.StringSliceCmd, len(keys))
+	for _, k := range keys {
+		cmds[k] = pipe.SMembers(cctx, k)
+	}
+	if _, err := pipe.Exec(cctx); err != nil {
+		return nil, err
+	}
+	for k, cmd := range cmds {
+		vals, err := cmd.Result()
+		if err != nil {
+			return nil, err
+		}
+		ms := make([][]byte, len(vals))
+		for i, v := range vals {
+			ms[i] = []byte(v)
+		}
+		out[k] = ms
+	}
+	return out, nil
+}
+
+func (s *RedisStore) HMSetBatch(ctx context.Context, ttl time.Duration, refresh bool, items map[string]map[string][]byte) error {
+	if len(items) == 0 {
+		return nil
+	}
+	cctx, c, cancel, err := s.withClient(ctx)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	pipe := c.Pipeline()
+	for k, fields := range items {
+		vals := make(map[string]interface{}, len(fields))
+		for f, v := range fields {
+			vals[f] = string(v)
+		}
+		pipe.HSet(cctx, k, vals)
+		if ttl > 0 {
+			if refresh {
+				pipe.Expire(cctx, k, ttl)
+			} else {
+				pipe.ExpireNX(cctx, k, ttl)
+			}
+		}
+	}
+	_, err = pipe.Exec(cctx)
+	return err
+}
+
+func (s *RedisStore) SAddBatch(ctx context.Context, ttl time.Duration, items map[string][][]byte) error {
+	if len(items) == 0 {
+		return nil
+	}
+	cctx, c, cancel, err := s.withClient(ctx)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	pipe := c.Pipeline()
+	for k, members := range items {
+		vals := make([]interface{}, len(members))
+		for i, m := range members {
+			vals[i] = string(m)
+		}
+		pipe.SAdd(cctx, k, vals...)
+		if ttl > 0 {
+			pipe.ExpireNX(cctx, k, ttl)
+		}
+	}
+	_, err = pipe.Exec(cctx)
+	return err
+}

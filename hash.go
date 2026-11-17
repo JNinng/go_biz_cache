@@ -142,6 +142,7 @@ func (h *TypedHashCache[K, F, V]) HGet(ctx context.Context, key K, field F) (V, 
 		return zero, err
 	}
 	lk := l1FieldKey(biz, fEnc)
+	// L1 复合键（解码失败视为脏数据删条目走 L2/回源自愈）
 	if c.l1 != nil {
 		if raw, ok := c.l1.Get(lk); ok {
 			if raw == nil {
@@ -149,42 +150,51 @@ func (h *TypedHashCache[K, F, V]) HGet(ctx context.Context, key K, field F) (V, 
 				return zero, ErrNotFound
 			}
 			v, err := h.decRaw(raw)
-			if err != nil {
-				return zero, err
+			if err == nil {
+				c.metrics.Hit(LevelL1, c.name)
+				return v, nil
 			}
-			c.metrics.Hit(LevelL1, c.name)
-			return v, nil
+			c.decodeError("l1:"+lk, err)
+			c.l1.Delete(lk)
+		} else {
+			c.metrics.Miss(LevelL1, c.name)
 		}
-		c.metrics.Miss(LevelL1, c.name)
 	}
 	if c.store != nil && c.degrade != DegradeSourceOnly {
 		data, err := c.store.HGet(ctx, h.fieldPhys(phys, fEnc), fEnc)
 		if err == nil {
 			raw, v, derr := h.decCompressed(data)
-			if derr != nil {
-				return zero, derr
+			if derr == nil {
+				c.metrics.Hit(LevelL2, c.name)
+				if c.l1 != nil {
+					c.l1.Set(lk, raw, c.ttlJittered())
+				}
+				return v, nil
 			}
-			c.metrics.Hit(LevelL2, c.name)
-			if c.l1 != nil {
-				c.l1.Set(lk, raw, c.ttlJittered())
+			// 脏 field 值：删该 field 走回源自愈重写
+			c.decodeError("l2:"+phys+"/"+fEnc, derr)
+			if hderr := c.store.HDel(ctx, h.fieldPhys(phys, fEnc), fEnc); hderr != nil {
+				c.logger.Warnf("gocache: purge corrupt field %s/%s for %s:%s: %v", biz, fEnc, c.ns, c.name, hderr)
 			}
-			return v, nil
-		}
-		if !errors.Is(err, ErrNotFound) {
+			c.metrics.Miss(LevelL2, c.name)
+		} else if !errors.Is(err, ErrNotFound) {
 			c.metrics.Error("l2_read", c.name)
 			if c.degrade == DegradeFail {
 				return zero, err
 			}
 			return zero, ErrNotFound // StaleL1：L1 已查无
+		} else {
+			c.metrics.Miss(LevelL2, c.name)
 		}
-		c.metrics.Miss(LevelL2, c.name)
-		// field 负标记（独立短 TTL string key）
-		if mk, gerr := c.store.Get(ctx, c.fieldNegKey(phys, fEnc)); gerr == nil && mk != nil {
-			c.metrics.Hit(LevelNegative, c.name)
-			if c.l1 != nil {
-				c.l1.Set(lk, nil, c.negTTL)
+		// field 负标记（独立短 TTL string key；NegativeCache 关闭时不探测）
+		if c.negative {
+			if mk, gerr := c.store.Get(ctx, c.fieldNegKey(phys, fEnc)); gerr == nil && mk != nil {
+				c.metrics.Hit(LevelNegative, c.name)
+				if c.l1 != nil {
+					c.l1.Set(lk, nil, c.negTTL)
+				}
+				return zero, ErrNotFound
 			}
-			return zero, ErrNotFound
 		}
 	}
 	// field 级 singleflight 回源
@@ -274,7 +284,12 @@ func (h *TypedHashCache[K, F, V]) HMGet(ctx context.Context, key K, fields ...F)
 				}
 				raw, v, derr := h.decCompressed(data)
 				if derr != nil {
-					return nil, derr
+					// 脏 field 值：删该 field，剩余交由回源自愈
+					c.decodeError("l2:"+sub+"/"+fEnc, derr)
+					if hderr := c.store.HDel(ctx, sub, fEnc); hderr != nil {
+						c.logger.Warnf("gocache: purge corrupt field %s/%s for %s:%s: %v", biz, fEnc, c.ns, c.name, hderr)
+					}
+					continue
 				}
 				c.metrics.Hit(LevelL2, c.name)
 				out[fieldOf[fEnc]] = v
@@ -385,15 +400,16 @@ func (h *TypedHashCache[K, F, V]) HSet(ctx context.Context, key K, field F, val 
 	}
 	ttl := c.ttlJittered()
 	if c.store != nil {
-		if err := c.store.HMSet(ctx, sub, map[string][]byte{fEnc: data}, ttl, c.refreshTTL); err != nil {
-			c.metrics.Error("l2_write", c.name)
-			return err
-		}
+		// 先清旧负标记后写数据：中途失败只少缓存，不会留下遮蔽新值的标记
 		if c.negative {
 			if err := c.store.Del(ctx, c.fieldNegKey(phys, fEnc)); err != nil {
 				c.metrics.Error("l2_write", c.name)
 				return err
 			}
+		}
+		if err := c.store.HMSet(ctx, sub, map[string][]byte{fEnc: data}, ttl, c.refreshTTL); err != nil {
+			c.metrics.Error("l2_write", c.name)
+			return err
 		}
 	}
 	if c.l1 != nil {
@@ -444,17 +460,16 @@ func (h *TypedHashCache[K, F, V]) HSetMulti(ctx context.Context, key K, fields m
 		}
 	}
 	if c.store != nil {
-		for sub, w := range groups {
-			if err := c.store.HMSet(ctx, sub, w, ttl, c.refreshTTL); err != nil {
-				c.metrics.Error("l2_write", c.name)
-				return err
-			}
-		}
+		// 先清旧负标记后批量写（单 pipeline）：中途失败只少缓存，不会留下遮蔽新值的标记
 		if len(negs) > 0 {
 			if err := c.store.Del(ctx, negs...); err != nil {
 				c.metrics.Error("l2_write", c.name)
 				return err
 			}
+		}
+		if err := c.store.HMSetBatch(ctx, ttl, c.refreshTTL, groups); err != nil {
+			c.metrics.Error("l2_write", c.name)
+			return err
 		}
 	}
 	c.publish(ctx, event.Updated, []string{phys})
@@ -514,14 +529,7 @@ func (h *TypedHashCache[K, F, V]) Delete(ctx context.Context, key K) error {
 		return err
 	}
 	if c.store != nil {
-		dels := []string{phys}
-		if c.big.Type == BigValueFieldShard {
-			dels = dels[:0]
-			for i := 0; i < c.big.FieldShard.ShardCount; i++ {
-				dels = append(dels, fieldShardKey(phys, i))
-			}
-		}
-		if err := c.store.Del(ctx, dels...); err != nil {
+		if err := c.store.Del(ctx, h.subkeysAll(phys)...); err != nil {
 			c.metrics.Error("delete", c.name)
 			return err
 		}
@@ -652,18 +660,16 @@ func (h *TypedHashCache[K, F, V]) loadFields(ctx context.Context, key K, biz, ph
 		out[fEnc] = loadResult[V]{}
 	}
 	if c.store != nil {
-		// 回写失败不影响本次读结果（降级路径下属预期），记日志交由指标观测
-		for sub, w := range writes {
-			if err := c.store.HMSet(ctx, sub, w, l1TTL, c.refreshTTL); err != nil {
-				c.metrics.Error("l2_write", c.name)
-				c.logger.Warnf("gocache: backfill %s for %s:%s: %v", biz, c.ns, c.name, err)
-			}
-		}
+		// 先清旧负标记后批量回写（单 pipeline）；回写失败不影响本次读结果（降级路径下属预期）
 		if len(negs) > 0 {
 			if err := c.store.Del(ctx, negs...); err != nil {
 				c.metrics.Error("l2_write", c.name)
 				c.logger.Warnf("gocache: clear field negatives %s for %s:%s: %v", biz, c.ns, c.name, err)
 			}
+		}
+		if err := c.store.HMSetBatch(ctx, l1TTL, c.refreshTTL, writes); err != nil {
+			c.metrics.Error("l2_write", c.name)
+			c.logger.Warnf("gocache: backfill %s for %s:%s: %v", biz, c.ns, c.name, err)
 		}
 	}
 	return out, nil
@@ -683,12 +689,16 @@ func (h *TypedHashCache[K, F, V]) loadAll(ctx context.Context, key K, biz, phys 
 			return loadResult[map[F]V]{}, ErrNotFound // StaleL1
 		}
 		if len(raws) > 0 {
-			c.metrics.Hit(LevelL2, c.name)
 			m, derr := h.decodeAll(raws, biz)
-			if derr != nil {
-				return loadResult[map[F]V]{}, derr
+			if derr == nil {
+				c.metrics.Hit(LevelL2, c.name)
+				return loadResult[map[F]V]{val: m, ok: true}, nil
 			}
-			return loadResult[map[F]V]{val: m, ok: true}, nil
+			// 脏数据/格式演进：清全部子 key，走全量回源自愈重写
+			c.decodeError("l2:"+phys, derr)
+			if serr := c.store.Del(ctx, h.subkeysAll(phys)...); serr != nil {
+				c.logger.Warnf("gocache: purge corrupt %s for %s:%s: %v", biz, c.ns, c.name, serr)
+			}
 		}
 		c.metrics.Miss(LevelL2, c.name)
 	}
@@ -731,11 +741,9 @@ func (h *TypedHashCache[K, F, V]) loadAll(ctx context.Context, key K, biz, phys 
 		}
 		if c.store != nil {
 			// 整写失败不影响本次读结果（降级路径下属预期）
-			for sub, w := range writes {
-				if werr := c.store.HMSet(ctx, sub, w, l1TTL, c.refreshTTL); werr != nil {
-					c.metrics.Error("l2_write", c.name)
-					c.logger.Warnf("gocache: backfill %s for %s:%s: %v", biz, c.ns, c.name, werr)
-				}
+			if werr := c.store.HMSetBatch(ctx, l1TTL, c.refreshTTL, writes); werr != nil {
+				c.metrics.Error("l2_write", c.name)
+				c.logger.Warnf("gocache: backfill %s for %s:%s: %v", biz, c.ns, c.name, werr)
 			}
 		}
 	} else {
@@ -744,23 +752,31 @@ func (h *TypedHashCache[K, F, V]) loadAll(ctx context.Context, key K, biz, phys 
 	return loadResult[map[F]V]{val: m, ok: true}, nil
 }
 
-// hGetAllRaw 整 hash 原始值：FieldShard 逐子 key HGETALL 合并（未走 pipeline），全空视为 key 不存在。
+// hGetAllRaw 整 hash 原始值：HGETALL（FieldShard 子 key 经 HGetAllBatch 单 pipeline 合并），全空视为 key 不存在。
 func (h *TypedHashCache[K, F, V]) hGetAllRaw(ctx context.Context, phys string) (map[string][]byte, error) {
-	c := h.core
-	if c.big.Type != BigValueFieldShard {
-		return c.store.HGetAll(ctx, phys)
+	mm, err := h.core.store.HGetAllBatch(ctx, h.subkeysAll(phys)...)
+	if err != nil {
+		return nil, err
 	}
 	merged := make(map[string][]byte)
-	for i := 0; i < c.big.FieldShard.ShardCount; i++ {
-		m, err := c.store.HGetAll(ctx, fieldShardKey(phys, i))
-		if err != nil {
-			return nil, err
-		}
+	for _, m := range mm {
 		for f, v := range m {
 			merged[f] = v
 		}
 	}
 	return merged, nil
+}
+
+// subkeysAll 全部物理子 key（FieldShard → N 个 :h{i}，否则整 key）。
+func (h *TypedHashCache[K, F, V]) subkeysAll(phys string) []string {
+	if h.core.big.Type == BigValueFieldShard {
+		keys := make([]string, 0, h.core.big.FieldShard.ShardCount)
+		for i := 0; i < h.core.big.FieldShard.ShardCount; i++ {
+			keys = append(keys, fieldShardKey(phys, i))
+		}
+		return keys
+	}
+	return []string{phys}
 }
 
 // decodeAll 解码整 hash（L2 值解压 + 反序列化）并回填 L1 复合键。

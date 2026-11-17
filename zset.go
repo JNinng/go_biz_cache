@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"time"
@@ -155,16 +156,20 @@ func (h *TypedZSetCache[K, V]) Range(ctx context.Context, key K, start, stop int
 	if err != nil {
 		return nil, err
 	}
+	// L1 整集合（解码失败视为脏数据删条目走 L2/回源自愈）
 	if c.l1 != nil {
 		if raw, ok := c.l1.Get(biz); ok {
 			var items []Scored[V]
-			if err := c.deserialize(h.ser, raw, &items); err != nil {
-				return nil, err
+			if err := c.deserialize(h.ser, raw, &items); err == nil {
+				c.metrics.Hit(LevelL1, c.name)
+				return sliceRange(items, start, stop), nil
+			} else {
+				c.decodeError("l1:"+biz, err)
+				c.l1.Delete(biz)
 			}
-			c.metrics.Hit(LevelL1, c.name)
-			return sliceRange(items, int(start), int(stop)), nil
+		} else {
+			c.metrics.Miss(LevelL1, c.name)
 		}
-		c.metrics.Miss(LevelL1, c.name)
 	}
 	if c.store != nil && c.degrade != DegradeSourceOnly {
 		zs, err := c.store.ZRangeWithScores(ctx, phys, start, stop)
@@ -177,28 +182,38 @@ func (h *TypedZSetCache[K, V]) Range(ctx context.Context, key K, start, stop int
 		}
 		if len(zs) > 0 {
 			c.metrics.Hit(LevelL2, c.name)
-			return h.decScored(zs)
-		}
-		// 空结果：key 存在（ZCard>0）→ 越界区间为合法空查询，不回源
-		card, err := c.store.ZCard(ctx, phys)
-		if err != nil {
-			c.metrics.Error("l2_read", c.name)
-			if c.degrade == DegradeFail {
-				return nil, err
+			items, derr := h.decScored(zs)
+			if derr == nil {
+				return items, nil
 			}
-			return nil, ErrNotFound
+			// 脏数据：清物理 key，走回源自愈重写
+			c.decodeError("l2:"+phys, derr)
+			if serr := c.store.Del(ctx, phys); serr != nil {
+				c.logger.Warnf("gocache: purge corrupt %s for %s:%s: %v", biz, c.ns, c.name, serr)
+			}
+		} else {
+			// 空结果：key 存在（ZCard>0）→ 越界区间为合法空查询，不回源
+			card, err := c.store.ZCard(ctx, phys)
+			if err != nil {
+				c.metrics.Error("l2_read", c.name)
+				if c.degrade == DegradeFail {
+					return nil, err
+				}
+				return nil, ErrNotFound
+			}
+			if card > 0 {
+				c.metrics.Hit(LevelL2, c.name)
+				return []Scored[V]{}, nil
+			}
+			c.metrics.Miss(LevelL2, c.name)
 		}
-		if card > 0 {
-			c.metrics.Hit(LevelL2, c.name)
-			return []Scored[V]{}, nil
-		}
-		c.metrics.Miss(LevelL2, c.name)
 	}
+	// key 缺失 → 整 key 回源重建
 	items, err := h.rebuild(ctx, key, biz, phys)
 	if err != nil {
 		return nil, err
 	}
-	return sliceRange(items, int(start), int(stop)), nil
+	return sliceRange(items, start, stop), nil
 }
 
 // RangeByScore 按分值区间读取。空结果可能是合法查询：ZCard 判空区分"空集合"与"未缓存"。
@@ -241,7 +256,11 @@ func (h *TypedZSetCache[K, V]) RangeByScore(ctx context.Context, key K, by ZRang
 	if err != nil {
 		return nil, err
 	}
-	return filterZByScore(items, by), nil
+	filtered, ferr := filterZByScore(items, by)
+	if ferr != nil {
+		return nil, ferr
+	}
+	return filtered, nil
 }
 
 // Score 点查分值：L2 直查（不触发回源、不走 L1）；本地模式 / SourceOnly 退化为整载判定。
@@ -345,11 +364,8 @@ func (h *TypedZSetCache[K, V]) rebuild(ctx context.Context, key K, biz, phys str
 	}
 	// redis ZSET 语义：读取按 score 升序（同分按成员序），重建结果排序后写与返回
 	h.sortScored(items)
-	if len(items) > 0 {
-		c.metrics.Hit(LevelSource, c.name)
-	} else {
-		c.metrics.Miss(LevelSource, c.name)
-	}
+	// 集合语义：loader 成功即命中源（空 zset 是合法源数据，与"源缺失"不混淆）
+	c.metrics.Hit(LevelSource, c.name)
 	ttl := c.ttlJittered()
 	if c.store != nil {
 		// 回源-整写窗口内并发写可能被重建覆盖，语义 last-write-win（设计 §6）；
@@ -384,14 +400,15 @@ func (h *TypedZSetCache[K, V]) rebuild(ctx context.Context, key K, biz, phys str
 }
 
 // filterZByScore ZRANGEBYSCORE 内存过滤（本地模式 / 重建后查询用；语义同 redis：-inf/+inf、"(x" 开区间、offset/count）。
-func filterZByScore[V any](items []Scored[V], by ZRangeBy) []Scored[V] {
-	minV, minInf, minExcl, err := parseZBound(by.Min)
+// 边界解析失败返回错误（语义对齐 redis 对非法边界的报错）。
+func filterZByScore[V any](items []Scored[V], by ZRangeBy) ([]Scored[V], error) {
+	minV, minInf, minExcl, err := parseZBoundLocal(by.Min)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	maxV, maxInf, maxExcl, err := parseZBound(by.Max)
+	maxV, maxInf, maxExcl, err := parseZBoundLocal(by.Max)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	out := make([]Scored[V], 0, len(items))
 	for _, s := range items {
@@ -402,17 +419,18 @@ func filterZByScore[V any](items []Scored[V], by ZRangeBy) []Scored[V] {
 	}
 	if by.Offset > 0 {
 		if int64(len(out)) <= by.Offset {
-			return nil
+			return nil, nil
 		}
 		out = out[by.Offset:]
 	}
 	if by.Count > 0 && int64(len(out)) > by.Count {
 		out = out[:by.Count]
 	}
-	return out
+	return out, nil
 }
 
-func parseZBound(s string) (v float64, inf, excl bool, err error) {
+// parseZBoundLocal 解析 ZRANGEBYSCORE 边界：-inf/+inf、"(x" 开区间、"x" 闭区间。
+func parseZBoundLocal(s string) (v float64, inf, excl bool, err error) {
 	if s == "-inf" || s == "+inf" {
 		return 0, true, false, nil
 	}
@@ -421,6 +439,9 @@ func parseZBound(s string) (v float64, inf, excl bool, err error) {
 		s = s[1:]
 	}
 	v, err = strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, false, false, fmt.Errorf("gocache: bad zrangebyscore bound %q: %w", s, err)
+	}
 	return
 }
 

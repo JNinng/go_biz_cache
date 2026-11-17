@@ -1,5 +1,7 @@
 // Package l2 提供 L2 缓存的 Redis 抽象：单机/集群统一（go-redis 客户端经提供者注入，§9.1），
 // 以及测试用内存实现（MemStore）。批量操作由实现内部 pipeline / 分组。
+//
+// Redis 服务端要求 ≥ 7.0：TTL 语义依赖 EXPIRE ... NX 选项（Redis 7.0 引入）。
 package l2
 
 import (
@@ -109,4 +111,10 @@ type Store interface {
 	ZCard(ctx context.Context, key string) (int64, error)
 	ZRangeWithScores(ctx context.Context, key string, start, stop int64) ([]Z, error)
 	ZRangeByScoreWithScores(ctx context.Context, key string, by ZRangeBy) ([]Z, error)
+
+	// 批量（FieldShard 子 key 合并；实现内部单 pipeline，集群模式由 ClusterClient 按 slot 分组）
+	HGetAllBatch(ctx context.Context, keys ...string) (map[string]map[string][]byte, error)
+	SMembersBatch(ctx context.Context, keys ...string) (map[string][][]byte, error)
+	HMSetBatch(ctx context.Context, ttl time.Duration, refresh bool, items map[string]map[string][]byte) error
+	SAddBatch(ctx context.Context, ttl time.Duration, items map[string][][]byte) error
 }

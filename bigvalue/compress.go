@@ -3,6 +3,7 @@
 package bigvalue
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
@@ -27,7 +28,7 @@ func zstdLevel(l CompressLevel) zstd.EncoderLevel {
 	case Speed:
 		return zstd.SpeedFastest
 	case High:
-		return zstd.SpeedBetterCompression
+		return zstd.SpeedBestCompression
 	default:
 		return zstd.SpeedDefault
 	}
@@ -85,7 +86,7 @@ func Compress(data []byte, level CompressLevel, threshold int) ([]byte, error) {
 	return out, nil
 }
 
-// Decompress 按标记头透明解压。
+// Decompress 按标记头透明解压；未知标记头视为数据损坏报错（调用方走脏数据自愈）。
 func Decompress(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return data, nil
@@ -96,6 +97,6 @@ func Decompress(data []byte) ([]byte, error) {
 	case headerZstd:
 		return decoder().DecodeAll(data[1:], nil)
 	default:
-		return data[1:], nil
+		return nil, fmt.Errorf("bigvalue: unknown compress header 0x%02x", data[0])
 	}
 }
