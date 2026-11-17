@@ -19,6 +19,6 @@
 //
 // 全局注入 Redis 客户端提供者 / 事件总线 / 指标 / 日志：
 //
-//	gocache.UseClientProvider(func(ctx) (gocache.RedisCmdable, error) { return clusterClient, nil })
-//	gocache.UseEventBus(gocache.NewRedisPubSub(provider)) // 跨实例 L1 一致性
+//	gocache.UseClientProvider(func(ctx context.Context) (gocache.RedisCmdable, error) { return clusterClient, nil })
+//	gocache.UseEventBus(event.NewRedisPubSub(provider)) // 跨实例 L1 一致性（event 包适配器）
 package gocache
