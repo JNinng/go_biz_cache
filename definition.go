@@ -46,13 +46,15 @@ var (
 	MsgPack = codec.MsgPack
 )
 
-// field 编解码器便捷构造。
+// FieldCodecString string 直通 field 编解码器便捷构造。
 func FieldCodecString() FieldCodec[string] { return codec.FieldCodecString() }
 
+// FieldCodecFunc 由转换函数构造 field 编解码器。
 func FieldCodecFunc[F any](enc func(F) (string, error), dec func(string) (F, error)) FieldCodec[F] {
 	return codec.FieldCodecFunc(enc, dec)
 }
 
+// FieldCodecMap 由双向映射表构造 field 编解码器（适用于枚举类型）。
 func FieldCodecMap[F comparable](enc map[F]string, dec map[string]F) FieldCodec[F] {
 	return codec.FieldCodecMap(enc, dec)
 }
@@ -99,10 +101,10 @@ type BigValuePolicy struct {
 
 // ---------- L1 / L2 选项 ----------
 
-// L1Options 本地缓存选项。
+// L1Options 本地缓存选项（Enabled 关闭则读写路径不经过 L1）。
 type L1Options struct {
 	Enabled bool
-	Size    int        // 默认 LRU 容量（条目数），默认 4096
+	Size    int        // LRU 容量（条目数）；默认 4096
 	Cache   l1.L1Cache // 注入实现（freecache/otter/bigcache 等），nil 时用默认分片 LRU
 }
 

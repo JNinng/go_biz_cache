@@ -17,6 +17,7 @@ func (c *defCore) publish(ctx context.Context, t event.Type, physKeys []string) 
 	}
 }
 
+// publishGen 广播 GenerationBumped 事件（无总线时跳过；发布失败仅记日志）。
 func (c *defCore) publishGen(ctx context.Context, gen int64) {
 	if c.bus == nil {
 		return

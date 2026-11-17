@@ -63,7 +63,7 @@ func (s *recStore) recordedTTLs() []time.Duration {
 	return append([]time.Duration(nil), s.setTTLs...)
 }
 
-// flakyStore 可切换故障的 Store（降级策略测试用）：fail=true 时全部读操作报错。
+// flakyStore 可切换故障的 Store（降级策略测试用）：fail=true 时全部读操作与 MSet 写入报错。
 type flakyStore struct {
 	l2.Store
 	fail atomic.Bool

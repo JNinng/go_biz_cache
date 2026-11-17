@@ -378,7 +378,7 @@ func (h *TypedHashCache[K, F, V]) HGetAll(ctx context.Context, key K) (map[F]V, 
 
 // ---------- 写入 / 失效 ----------
 
-// HSet 写单 field（写穿）：HMSet 到定位子 key → 清旧负标记 → 更新本实例 L1 → 广播 Updated。
+// HSet 写单 field（写穿）：清旧负标记 → HMSet 到定位子 key → 更新本实例 L1 → 广播 Updated。
 func (h *TypedHashCache[K, F, V]) HSet(ctx context.Context, key K, field F, val V) error {
 	c := h.core
 	biz := keyString(key)
@@ -419,7 +419,7 @@ func (h *TypedHashCache[K, F, V]) HSet(ctx context.Context, key K, field F, val 
 	return nil
 }
 
-// HSetMulti 批量写 fields：按子 key 分组 HMSet → 清负标记 → 更新本实例 L1 → 一次广播 Updated。
+// HSetMulti 批量写 fields：清旧负标记 → 按子 key 分组 HMSet → 更新本实例 L1 → 一次广播 Updated。
 func (h *TypedHashCache[K, F, V]) HSetMulti(ctx context.Context, key K, fields map[F]V) error {
 	if len(fields) == 0 {
 		return nil

@@ -110,14 +110,13 @@ func TestOnEventDegradedToClearWhenInverseFails(t *testing.T) {
 	Reset()
 	defer Reset()
 	h := newTestObject(l2.NewMemStore(), nil, func(d *Definition[userProfile]) {
-		// 自定义 TagFunc 返回不可逆变换（Insert 无定位信息由 probe 记录 Value，可逆）
-		// 这里用动态 Value 的函数模拟 probe 失配：probe 期 Value=A，事件期 Value=B
+		// 自定义 TagFunc 前缀注入变换（Prefix/Suffix/Insert 经 probe 记录 Value 常量后可逆）
 		d.HashTag = func(in TagInput) (TagOp, error) {
 			return TagOp{Kind: TagPrefix, Value: "dc:" + in.Name}, nil
 		}
 	})
 	h.Set(context.Background(), "t:acme:u:1", userProfile{ID: "1"})
-	// probe 记录 Value="dc:users"，事件 key 用别的 Value → 逆变换失败 → 退化为整 L1 清理
+	// 事件 key 前缀与 probe 记录的 Value 不符 → 逆变换失败 → 退化为整 L1 清理
 	h.core.onEvent(event.Event{
 		Type: event.Updated, Namespace: "test", DefName: "users",
 		Keys: []string{"zz:test:users:v0:t:acme:u:1"}, Instance: "other",

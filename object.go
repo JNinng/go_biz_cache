@@ -650,7 +650,7 @@ func (h *TypedObjectCache[K, V]) loadFromSource(ctx context.Context, key K, biz 
 	return v, true, nil
 }
 
-// storeValue 写穿：序列化 → 压缩 → 写 L2（Zstd/Shard）→ 清旧负标记 → 回填本实例 L1（序列化原字节，L1 不参与大 key 策略）。
+// storeValue 写穿：序列化 → 压缩 → 清旧负标记 → 写 L2（Zstd/Shard）→ 回填本实例 L1（序列化原字节，L1 不参与大 key 策略）。
 func (h *TypedObjectCache[K, V]) storeValue(ctx context.Context, biz, phys string, v V) error {
 	c := h.core
 	raw, err := c.serialize(h.ser, v)

@@ -34,6 +34,7 @@ func (c *defCore) buildKey(ctx context.Context, bizKey string) (logical, phys st
 	return logical, phys, nil
 }
 
+// ttlJittered 应用 TTL 抖动：按 ±jitter 比例打散，下限钳制 1s（防雪崩）。
 func (c *defCore) ttlJittered() time.Duration {
 	if c.jitter <= 0 {
 		return c.ttl
@@ -46,6 +47,7 @@ func (c *defCore) ttlJittered() time.Duration {
 	return d
 }
 
+// negKey 单 key 负缓存标记：{物理key}:__neg（独立短 TTL string key）。
 func (c *defCore) negKey(phys string) string { return phys + ":__neg" }
 
 // fieldNegKey hash field 负缓存标记：{物理key}:__neg:{fnv1a(field)}（与 FieldShard 正交，独立于子 hash）。
@@ -53,6 +55,7 @@ func (c *defCore) fieldNegKey(phys, field string) string {
 	return phys + ":__neg:" + strconv.FormatUint(bigvalue.FNV1a([]byte(field)), 16)
 }
 
+// shardKey / fieldShardKey Shard / FieldShard 子 key 命名（:s{i} / :h{i}）。
 func shardKey(phys string, i int) string      { return phys + ":s" + strconv.Itoa(i) }
 func fieldShardKey(phys string, i int) string { return phys + ":h" + strconv.Itoa(i) }
 

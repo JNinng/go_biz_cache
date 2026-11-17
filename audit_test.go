@@ -12,7 +12,7 @@ import (
 	"github.com/jninng/go_biz_cache/l2"
 )
 
-// ---------- 降级分支（审查遗留：hash/集合/MultiGet 此前未测）----------
+// ---------- 降级分支（Object MultiGet / hash / 集合）----------
 
 func TestObjectMultiGetDegrade(t *testing.T) {
 	Reset()
