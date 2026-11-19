@@ -51,7 +51,7 @@ type UserProfile struct {
 func main() {
 	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
 
-	// 全局注入：客户端提供者（返回即已连接就绪）、事件总线、指标
+	// 全局注入：客户端提供者（返回即已连接就绪）与指标（跨实例事件总线见下节）
 	gocache.UseClientProvider(func(ctx context.Context) (gocache.RedisCmdable, error) { return rdb, nil })
 	gocache.UseMetrics(gocache.NewPrometheusMetrics(nil))
 
@@ -94,11 +94,11 @@ gocache.UseEventBus(event.NewRedisPubSub(provider))
 
 | 结构 | 构造 | 读 | 写 | 回源契约 |
 |------|------|----|----|----------|
-| Object | `gocache.Define[MustDefine](ns, name, def)` | `Get` / `MultiGet` / `Refresh` | `Set` / `SetMulti` / `Delete` | `Loader: func(ctx, []string) (map[string]V, error)` |
-| Hash | `DefineHash[MustDefineHash](ns, name, def, opts)` | `HGet` / `HMGet` / `HGetAll` | `HSet` / `HSetMulti` / `HDel` / `Delete` | `HashLoader: func(ctx, key, fields []F) (map[F]V, error)` |
-| Set | `DefineSet[MustDefineSet](ns, name, def, opts)` | `Members` / `IsMember` | `Add` / `Remove` / `Delete` | `SetLoader: func(ctx, key) ([]M, error)` |
-| List | `DefineList[MustDefineList](ns, name, def, opts)` | `Range` / `Len` | `LPush` / `RPush` / `Trim` / `Delete` | `ListLoader: func(ctx, key) ([]V, error)` |
-| ZSet | `DefineZSet[MustDefineZSet](ns, name, def, opts)` | `Range` / `RangeByScore` / `Score` | `Add` / `Remove` / `Delete` | `ZSetLoader: func(ctx, key) ([]Scored[V], error)` |
+| Object | `Define` / `MustDefine`（ns, name, def） | `Get` / `MultiGet` / `Refresh` | `Set` / `SetMulti` / `Delete` | `Loader: func(ctx, []string) (map[string]V, error)` |
+| Hash | `DefineHash` / `MustDefineHash`（ns, name, def, opts） | `HGet` / `HMGet` / `HGetAll` | `HSet` / `HSetMulti` / `HDel` / `Delete` | `HashLoader: func(ctx, key, fields []F) (map[F]V, error)` |
+| Set | `DefineSet` / `MustDefineSet`（ns, name, def, opts） | `Members` / `IsMember` | `Add` / `Remove` / `Delete` | `SetLoader: func(ctx, key) ([]M, error)` |
+| List | `DefineList` / `MustDefineList`（ns, name, def, opts） | `Range` / `Len` | `LPush` / `RPush` / `Trim` / `Delete` | `ListLoader: func(ctx, key) ([]V, error)` |
+| ZSet | `DefineZSet` / `MustDefineZSet`（ns, name, def, opts） | `Range` / `RangeByScore` / `Score` | `Add` / `Remove` / `Delete` | `ZSetLoader: func(ctx, key) ([]Scored[V], error)` |
 
 全部句柄均有 `InvalidateAll`（批次全量失效）。hash 的 field 类型 `F` 经 `FieldCodec` 编解码：`F = string` 直通；int/enum 用 `FieldCodecFunc` / `FieldCodecMap` 转换，未提供且 `F` 非 string 时注册报错。
 
@@ -121,7 +121,7 @@ gocache.BigValuePolicy{Type: gocache.BigValueFieldShard,
 	FieldShard: gocache.FieldShardOptions{ShardCount: 16}} // 可注入自定义 Hasher
 ```
 
-不配置即 `None`（零值默认，原样存取）。策略不叠加；`ShardCount`/`Splitter`/`Hasher` 变更需先 `InvalidateAll`（见 `FieldShardOptions` 注释）。
+不配置即 `None`（零值默认，原样存取）。策略不叠加。`FieldShard` 的 `ShardCount`/`Hasher` 变更前需 `InvalidateAll`（旧子 key 在旧 TTL 内可能返回不完整集合，见 `FieldShardOptions` 注释）；`Shard`/`Zstd` 参数变更按单键自愈重写，旧数据靠 TTL 过期。
 
 ## 本地模式（无 Redis）
 

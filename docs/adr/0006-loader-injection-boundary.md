@@ -35,3 +35,5 @@ Object 的 Loader 以 key 列表为入参（MultiGet 批量契约，不循环单
 - 库与存储完全解耦，测试可用任意 Loader 实现（含内存 stub）。
 - 回源行为（含错误处理）由业务掌控；Loader 返回的 map 中缺失 key 即按未命中处理（触发负缓存）。
 - 分布式锁仅库内部用于回源保护，不对外暴露通用锁 API。
+
+> 现状：回源保护当前仅进程内 singleflight（Get 单 key 合并、MultiGet 组内 leader 一次批量加载），分布式回源锁未实现，为后续可选项（design.md §12）；「不对外暴露通用锁 API」的边界不变。

@@ -6,7 +6,7 @@
 
 **目标**
 
-- 强类型 API：`TypedCache[T]`，业务不接触裸 `[]byte`/`string`
+- 强类型 API：泛型句柄族（`TypedObjectCache` / `TypedHashCache` / `TypedSetCache` / `TypedListCache` / `TypedZSetCache`，导出句柄 K 恒为 string），业务不接触裸 `[]byte`/`string`
 - 统一 key 构建：声明式定义，一改全生效
 - 多数据结构支持（string/hash/set/zset/list 语义层）
 - Redis 集群适配（基于 go-redis ClusterClient）
@@ -39,13 +39,13 @@
 ## 3. 核心概念
 
 ```
-CacheDefinition   声明式缓存定义（注册表条目）
-TypedCache[T]     强类型缓存句柄，业务持有并使用
-Loader            源数据访问契约，业务实现，库注入
-Serializer        序列化器接口（json / msgpack / proto 可插拔）
+Definition                                      声明式缓存定义（注册表条目，经 Define / DefineHash / … 注册）
+TypedObjectCache / TypedHashCache / …           泛型句柄族（导出句柄 K 恒为 string），业务持有并使用
+Loader / HashLoader / SetLoader / ListLoader / ZSetLoader   源数据访问契约，业务实现，库注入
+Serializer        序列化器接口（内置 json / msgpack；proto 等经接口注入）
 FieldCodec        hash field 编解码（field 类型 F ↔ Redis field 名）
-L1Cache           本地缓存接口（默认进程内 LRU，可换 freecache/otter/bigcache）
-EventBus          事件总线接口（进程内 / Redis Pub/Sub 适配器）
+L1Cache           本地缓存接口（默认进程内分片 LRU，可换 freecache/otter/bigcache）
+event.Bus         事件总线接口（进程内 / Redis Pub/Sub 适配器）
 BigValuePolicy    大 key 策略枚举（None / Zstd / Shard / FieldShard，按定义四选一）
 ```
 
@@ -54,7 +54,7 @@ BigValuePolicy    大 key 策略枚举（None / Zstd / Shard / FieldShard，按�
 每个缓存在包级定义一次，集中管理：
 
 ```go
-var userProfileCache = gocache.Define[gocache.UserProfile](
+var userProfileCache = gocache.MustDefine(   // 注册失败 panic（包级定义配置错误尽早暴露）
     "biz",              // namespace（命名空间，租户隔离靠 key 模板实现）
     "user_profile",     // 逻辑名
     gocache.Definition[gocache.UserProfile]{
@@ -88,14 +88,14 @@ var userProfileCache = gocache.Define[gocache.UserProfile](
 - **世代号解析机制**：
   - 世代号存储在 Redis 元 key（`{ns}:{name}:__gen`，不占用业务 key 命名空间）；
   - `InvalidateAll` 对元 key 执行 `INCR`（原子，避免多实例并发失效覆盖），新世代号随 `GenerationBumped` 事件广播；
-  - 读取端：进程内按定义缓存当前世代号，首次使用 GET 一次后摊销为 0 次额外 RTT；收到 `GenerationBumped` 事件即时更新本地世代号；
+  - 读取端：进程内按定义缓存当前世代号，TTL 内零额外 RTT（短 TTL 惰性刷新，见下）；收到 `GenerationBumped` 事件即时更新本地世代号；
   - 兜底：事件 at-most-once 可能丢失，本地世代号带短 TTL（默认 5s 惰性刷新）；窗口内最多读到旧世代旧值（stale 窗口秒级，与 L1 一致性定位一致）；
   - Redis 不可用时沿用最后已知世代号，不阻塞读取。
 - **为何用世代号而非 SCAN+DEL 删除**（批次全量失效的取舍）：
   - SCAN 成本 O(keyspace)，集群下需逐 master 节点执行，大库时失效耗时分钟级并持续冲击线上延迟；世代号 INCR 为 O(1)；
   - 删除窗口与并发写存在竞态（删后写回旧值），需二次扫描兜底；世代号机制下新写入天然进新世代，无竞态；
   - 跨实例 L1 清理：世代号靠单个 `GenerationBumped` 事件，SCAN 方案需广播海量 key，载荷不可行；
-  - 代价：旧世代 key 占用内存直至 TTL 过期；如需提前回收，可叠加深度的后台低频增量清理（按旧世代前缀分批 SCAN+DEL，仅加速回收、不影响正确性，见 §12 后续）。
+  - 代价：旧世代 key 占用内存直至 TTL 过期；如需提前回收，可叠加深度的后台低频增量清理（按旧世代前缀分批 SCAN+DEL，仅加速回收、不影响正确性，见 §12）。
 - 所有 key 构建走 `KeyBuilder`，提供 `With(key, val)` 链式展开模板
 
 ### 3.3 集群 slot 控制（key 变换 / hash-tag）
@@ -203,7 +203,7 @@ Get(ctx, key)
 
 MultiGet(ctx, keys)
   → L1 批量探测 → 命中直接取
-  → 未命中 keys 批量探测 L2（Shard key 按各自分片组 MGET，跨 slot 由 ClusterClient 分组）
+  → 未命中 keys 批量探测 L2（全部物理键、Shard 子键与负标记合并一次 MGET，跨 slot 由 ClusterClient 分组）
        → 命中：回填 L1，返回
        → 负缓存标记命中：回填 L1 负缓存条目，记缺失
   → 仍未命中 keys：singleflight 按 key 粒度合并 → Loader 批量
@@ -212,9 +212,9 @@ MultiGet(ctx, keys)
   → 返回 map：负缓存/未命中 key 不出现在 map 中，调用方按缺失处理（不返回 ErrNotFound）
 ```
 
-- **singleflight**：进程内 singleflight 合并同 key 并发回源；可选分布式锁（SET NX + TTL）保护多实例同时回源，默认关闭（回源幂等时无需）
+- **singleflight**：进程内 singleflight 合并同 key 并发回源（MultiGet 组内 leader 合并为一次 Loader 调用）；多实例各自独立回源，不内置分布式锁（分布式回源锁为后续可选项，见 §12）
 - **TTL jitter**：写入 L2 时按 `TTLJitter` 打散过期时间
-- **降级**：Redis 不可用时按定义配置选择——`SourceOnly`（直连源）/ `StaleL1`（只用 L1 旧值）/ `Fail`（默认，返回错误）
+- **降级**：Redis 不可用时按定义配置选择——`DegradeSourceOnly`（直连源）/ `DegradeStaleL1`（只用 L1 旧值）/ `DegradeFail`（默认，返回错误）
 
 ## 5. 更新与失效语义
 
@@ -227,15 +227,15 @@ MultiGet(ctx, keys)
 | `InvalidateAll(ctx)` | 批次全量失效 | 对世代号元 key `INCR` 递增 + 发布 `GenerationBumped` 事件；旧 key 靠 TTL 过期 |
 | `MultiGet(ctx, keys)` | 批次获取 | 按 §4 MultiGet 流程：L1 批量探测 → 未命中 keys 批量探测 L2 → 剩余 keys singleflight 合并后一次性传给 Loader（批量契约）→ 逐级回填；负缓存/未命中 key 不出现在返回 map |
 
-双删语义：业务在"先写库后失效"场景用 `Delete`；需要更强一致时由业务自行组合（规划提供 `Delete` 后短延迟再删一次的 `DeleteTwice` 可选方法，见 §12 后续）。
+双删语义：业务在"先写库后失效"场景用 `Delete`；需要更强一致时由业务自行组合（规划提供 `Delete` 后短延迟再删一次的 `DeleteTwice` 可选方法，见 §12）。
 
 ## 6. 多数据结构（强类型操作矩阵）
 
-每种结构一个泛型句柄，读/写/回源全部强类型。`K` 在 v1 恒为 `string`（业务键即模板展开后的字符串），定义层 `Define[V]` 不含 K；`V` 为值类型（走 Serializer），hash 的 field 类型 `F` 走 FieldCodec（string 直通；int/enum 经转换函数映射为 Redis field 名）。
+每种结构一个泛型句柄，读/写/回源全部强类型。`K` 恒为 `string`（导出句柄固定 K=string，非 string 经 fmt.Sprint 归一；业务键即模板展开后的字符串），定义层 `Define[V]` 不含 K；`V` 为值类型（走 Serializer），hash 的 field 类型 `F` 走 FieldCodec（string 直通；int/enum 经转换函数映射为 Redis field 名）。
 
 | 结构 | 句柄 | 读操作 | 写操作 | 回源契约 |
 |------|------|--------|--------|----------|
-| Object（string） | `TypedObjectCache[K, V]` | `Get` / `MultiGet` | `Set` / `SetMulti` / `Delete` | `Loader: func(ctx, []K) (map[K]V, error)` |
+| Object（string） | `TypedObjectCache[K, V]` | `Get` / `MultiGet` / `Refresh` | `Set` / `SetMulti` / `Delete` | `Loader: func(ctx, []K) (map[K]V, error)` |
 | Hash | `TypedHashCache[K, F, V]` | `HGet(key, field)` / `HMGet(key, fields...)` / `HGetAll(key)` | `HSet` / `HSetMulti` / `HDel` | `HashLoader: func(ctx, key K, fields []F) (map[F]V, error)` |
 | Set | `TypedSetCache[K, M]` | `Members(key)` / `IsMember(key, m)` | `Add` / `Remove` | `SetLoader: func(ctx, K) ([]M, error)` |
 | List | `TypedListCache[K, V]` | `Range(key, start, stop)` / `Len(key)` | `LPush` / `RPush` / `Trim` | `ListLoader: func(ctx, K) ([]V, error)` |
@@ -243,7 +243,7 @@ MultiGet(ctx, keys)
 
 **hash field 级语义细节（重点）**：
 
-- `HGet/HMGet` 未命中 field 走 field 级回源：Redis 命中的 fields 直接取，缺失的 fields 一次性传给 `HashLoader`（批量契约，不循环单查），结果 `HMSET` 回填并刷新 key TTL
+- `HGet/HMGet` 未命中 field 走 field 级回源：Redis 命中的 fields 直接取，缺失的 fields 一次性传给 `HashLoader`（批量契约，不循环单查），结果 `HMSET` 回填（key TTL 刷新受 `RefreshTTLOnWrite` 控制，见下）
 - singleflight 与负缓存按 `(key, field)` 粒度合并/占位，而非整个 key
 - 负缓存标记为**独立短 TTL string key**，不写入真实数据结构（避免污染）：Object 为 `{物理key}:__neg`；hash field 为 `{物理key}:__neg:{fnv1a(field)}`（与 FieldShard 正交，独立于子 hash）；`HMGet` 读路径检查对应标记，`HGetAll` 不读标记（全量语义，见上）
 - `HGetAll` 整 hash 读：hash 存在则直接返回；不存在走 `HashLoader(ctx, key, nil)`（fields 为空表示全量回源）；返回 `map[F]V` 中未写入的 field 静默缺失——`HGetAll` 是全量语义，不存在即不存在，不做负缓存占位；负缓存仅作用于单 field 的 `HGet/HMGet`
@@ -252,7 +252,7 @@ MultiGet(ctx, keys)
 - 写 field 时 TTL 刷新策略由定义控制：`HashOptions{RefreshTTLOnWrite: bool}`
 - 大 hash 场景建议声明 `FieldShard` 策略（§7）：field 级操作定位到单个子 key，避免整 hash 大 key
 
-里程碑安排见 §12。
+后续演进方向见 §12。
 
 ## 7. 大 key 处理（明确策略，四选一，各带专属参数）
 
@@ -320,15 +320,17 @@ BigValue: gocache.BigValuePolicy{
 ## 8. 事件驱动
 
 ```go
-type Event struct {
-    Type      EventType  // Updated / Invalidated / GenerationBumped
+type Event struct { // event 包
+    Type      Type     // Updated / Invalidated / GenerationBumped
+    Namespace string   // 事件按 namespace 分 channel / 过滤
     DefName   string
-    Keys      []string   // Updated/Invalidated: 变换后物理 key（不含分片子 key）；GenerationBumped: 空（订阅方按 DefName 清空 L1）
-    Instance  string     // 发布者实例 ID（过滤自身事件）
+    Keys      []string // Updated/Invalidated: 变换后物理 key（不含分片子 key）；GenerationBumped: 空（订阅方按 DefName 清空 L1）
+    Gen       int64    // GenerationBumped: 新世代号
+    Instance  string   // 发布者实例 ID（过滤自身事件）
 }
 ```
 
-- 接口：`EventBus`（`Publish / Subscribe / Close`）
+- 接口：`event.Bus`（`Publish / Subscribe / Close`）
 - 默认实现：进程内总线（单机/单实例模式）；跨实例：Redis Pub/Sub 适配器（channel 按 namespace 分）
 - 订阅方收到 `Updated/Invalidated` 后**删除** L1 对应条目，不回源；事件**不带 value 载荷**（大值不经 Pub/Sub，与轻量定位一致，删除后下次读走 L2 即新值）；收到 `GenerationBumped` 后整代 L1 清空
 - 发起 `InvalidateAll` 的实例不依赖自身事件：`INCR` 成功后同步清空自身 L1 并更新本地世代号；`Instance` 过滤作用于全部事件类型（发起实例均已同步处理自身状态，处理自身事件只会造成冗余操作）
@@ -339,7 +341,7 @@ type Event struct {
 
 - 接口 `L1Cache`：`Get / Set / Delete / Clear / Size`（`Set` 携带 TTL 参数，负缓存条目的短 TTL 过期依赖此），默认实现为进程内分片 LRU
 - **实现注入**：`L1Options{Enabled, Size, Cache}`——`Cache` 字段为 `L1Cache` 接口，非 nil 时使用注入实现（freecache/otter/bigcache 等），nil 时用默认 LRU。自定义实现须满足契约：并发安全；按 TTL 过期；键粒度遵循上文（逻辑键，hash 为 `逻辑键+field` 复合键）；值为序列化后的字节（L1 不参与大 key 策略，原样存取）
-- **键粒度**：L1 键 = 逻辑键（不含 ns/name 前缀、hash-tag 大括号与世代号段）；hash 场景为 `逻辑键 + field` 复合键。事件 `Keys` 为变换后物理 key，订阅方由库**逆变换**映射回逻辑键后删 L1；世代号变更不进 L1 键，靠 `GenerationBumped` 整代清空兜底
+- **键粒度**：L1 键 = 逻辑键（不含 ns/name 前缀、hash-tag 大括号与世代号段）；hash 场景为 `逻辑键 + field` 复合键。事件 `Keys` 为变换后物理 key，订阅方由库**逆变换**映射回逻辑键后删 L1（逆变换依赖注册期探测的变换模板；探测失败或 hash 结构——事件仅携带整 key 而 L1 为 field 复合键——时退化为整定义清空）；世代号变更不进 L1 键，靠 `GenerationBumped` 整代清空兜底
 - **独立启用**：定义关闭 L2（不配置 Redis 连接）时整体退化为"纯本地缓存库"（无 Redis 依赖运行），事件仅进程内；世代号改存进程内存，重启归零等价全量失效（L1 随进程消亡，可接受），`InvalidateAll` 仅清本进程
 - 一致性：同进程写入即生效；跨实例经事件广播（§8）
 
@@ -361,47 +363,60 @@ type ClientProvider func(ctx context.Context) (RedisCmdable, error)
 ## 10. 可观测性与容错
 
 - 指标（Prometheus 接口 + 内置实现）：逐级命中率（L1/L2/负缓存/源）、回源耗时、singleflight 合并率、序列化/压缩开销、超大值写入次数（§7）、错误计数（按定义打标签）
-- 日志钩子：`Logger` 接口注入，慢查询/降级/大 key 告警点
+- 日志钩子：`Logger` 接口注入（定义级可覆盖），覆盖事件发布失败、脏数据自愈清除、写穿回填/负标记写失败、世代号刷新失败等异常点
 - 超时：L2 读写独立超时；超时即触发降级策略
 
 ## 11. 包结构
 
 ```
 gocache/
+├── doc.go              # 包文档（定义 / 注入入口指引）
 ├── object.go           # TypedObjectCache（string 值语义）
 ├── hash.go             # TypedHashCache
 ├── set.go              # TypedSetCache
 ├── list.go             # TypedListCache
 ├── zset.go             # TypedZSetCache
-├── definition.go       # Define / Definition / 注册表
-├── key.go              # KeyBuilder / 世代号 / TagOp key 变换
-├── loader.go           # Loader 契约与批量加载器
+├── definition.go       # Definition / L1Options / L2Options / BigValuePolicy / 各结构 Options
+├── register.go         # 定义注册与校验（重复注册 / 非法参数报错）
+├── registry.go         # 全局注入（UseClientProvider / UseEventBus / UseMetrics / UseLogger）
+├── core.go             # defCore 定义级核心（key 构建 / TTL jitter / 负标记 / 子 key 定位）
+├── handle.go           # 句柄共享设施（键归一 / 批量回源协调）
+├── key.go              # KeyBuilder / TagOp key 变换 / 世代号
+├── loader.go           # Loader / HashLoader / SetLoader / ListLoader / ZSetLoader 契约
+├── events.go           # 事件发布与订阅（Updated / Invalidated / GenerationBumped）
+├── errors.go           # ErrNotFound / ErrInvalidDefinition / ErrKeyBuild / ErrContract
+├── codecrt.go          # 序列化 / 压缩运行时（编解码、超大值断言、脏数据自愈）
+├── validate.go         # 注册期校验与 L1 / L2 组装
 ├── codec/
-│   ├── codec.go        # Serializer / FieldCodec 接口 + 注册
-│   ├── json.go / msgpack.go / proto.go
+│   ├── codec.go        # Serializer / FieldCodec 接口 + JSON 实现 + FieldCodec 构造器
+│   └── msgpack.go      # 内置 MsgPack 序列化器
 ├── l1/
 │   ├── l1.go           # L1Cache 接口
 │   └── lru.go          # 默认分片 LRU
 ├── l2/
-│   ├── l2.go           # Redis 抽象（单机/集群统一，客户端经提供者注入，§9.1）
-│   └── redis.go        # go-redis ClusterClient 实现
+│   ├── types.go        # Redis 抽象（RedisCmdable / ClientProvider / Store，§9.1）
+│   ├── redis.go        # go-redis Store 实现（Client / ClusterClient 统一，跨 slot 批量自动分组）
+│   └── memstore.go     # 内存 Store 实现（测试 / 自实现后端用）
 ├── bigvalue/
-│   ├── compress.go     # zstd
-│   ├── shard.go        # 内容切分（Object 大值）
-│   └── fieldshard.go   # 成员哈希分片（Hash/Set 大集合）
+│   ├── compress.go     # zstd 压缩（1 字节 header）
+│   ├── shard.go        # 内容切分（Object 大值，默认均匀切分 SplitEven）
+│   └── fieldshard.go   # 成员哈希分片（Hash/Set 大集合，默认 FNV-1a）
 ├── event/
-│   ├── bus.go          # EventBus 接口 + 进程内实现
-│   └── redispubsub.go
-├── singleflight.go
-├── metrics.go
-└── degrade.go          # 降级策略
+│   ├── bus.go          # event.Bus 接口 + 进程内实现
+│   └── redispubsub.go  # Redis Pub/Sub 适配器（§9.1）
+├── singleflight.go     # 进程内 singleflight
+├── metrics.go          # Metrics 接口 + 内置 Prometheus 实现
+└── degrade.go          # 降级策略与 Logger 默认实现
 ```
 
-## 12. 里程碑
+## 12. 后续演进
 
-| 阶段 | 内容 |
+| 方向 | 内容 |
 |------|------|
-| v0.1 | 定义注册表、key 构建 + 世代号、TypedObjectCache（string 值语义）、Get/Set/Delete/MultiGet/InvalidateAll、TTL jitter、singleflight、负缓存、Prometheus 指标、内存实现（测试用） |
-| v0.2 | L1 接口 + 默认 LRU、事件总线（进程内 + Redis Pub/Sub）、独立本地模式、降级策略 |
-| v0.3 | 大 key 压缩 + 内容切分 + 成员哈希分片（FieldShard，Hash/Set）、hash/set/list/zset 结构化句柄、可插拔序列化器（msgpack/proto）、分布式回源锁（可选） |
-| 后续 | 代码生成路径（若性能需要）、MQ 事件适配器、DeleteTwice、热点探测、旧世代 key 后台增量清理（可选，提前回收内存） |
+| 代码生成路径 | 性能确认不够时为热点类型生成专用编解码（ADR-0001 预留） |
+| MQ 事件适配器 | Kafka/NATS 等经 `event.Bus` 同一接口接入，业务零改动 |
+| `DeleteTwice` | `Delete` 后短延迟再删一次的可选方法（更强一致，业务自选） |
+| proto 内置序列化器 | 当前内置 JSON / MsgPack；proto 经 `Serializer` 接口由业务注入 |
+| 分布式回源锁 | SET NX + TTL 保护多实例同时回源（可选，回源幂等时无需） |
+| 热点探测 | 待设计 |
+| 旧世代 key 后台增量清理 | 按旧世代前缀分批 SCAN+DEL，提前回收内存（可选，见 §3.2） |

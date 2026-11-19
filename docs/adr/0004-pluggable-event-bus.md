@@ -17,6 +17,8 @@
 
 事件结构 `Event{Type, DefName, Keys, Instance}`，类型为 `Updated / Invalidated / GenerationBumped`；`Instance` 为发布者实例 ID，订阅方据此过滤自身事件。
 
+> 现状：接口定名 `event.Bus`（`Publish / Subscribe / Close`，Subscribe 返回取消函数）；`Event` 结构在上述字段基础上扩展 `Namespace`（Pub/Sub channel 按 namespace 分）与 `Gen`（GenerationBumped 携带新世代号），见 event/bus.go。
+
 ## 备选方案
 
 - **硬编码 Redis Pub/Sub**：实现简单，但换 MQ 时需改动库与业务。被否决。
