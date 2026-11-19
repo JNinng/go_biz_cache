@@ -14,26 +14,26 @@ const (
 	LevelSource   = "source"
 )
 
-// Metrics 可观测性接口（Prometheus 接口 + 内置实现；注入 nil 时为 Noop）。
+// Metrics 可观测性接口；内置 Prometheus 实现（NewPrometheusMetrics），未注入时为 Noop。
 type Metrics interface {
 	Hit(level, def string)
 	Miss(level, def string)
 	ObserveSourceLoad(def string, d time.Duration)
 	SingleflightShared(def string, n int)
-	OversizeWrite(def string)                  // 超大值写入次数（治理参考）
-	Error(op, def string)                      // 错误计数（按操作与定义打标签）
+	OversizeWrite(def string)                       // 超大值写入次数（治理参考）
+	Error(op, def string)                           // 错误计数（按操作与定义打标签）
 	ObserveCodec(kind, def string, d time.Duration) // kind: serialize/deserialize/compress/decompress
 }
 
 type noopMetrics struct{}
 
-func (noopMetrics) Hit(string, string)                                    {}
-func (noopMetrics) Miss(string, string)                                   {}
-func (noopMetrics) ObserveSourceLoad(string, time.Duration)               {}
-func (noopMetrics) SingleflightShared(string, int)                        {}
-func (noopMetrics) OversizeWrite(string)                                  {}
-func (noopMetrics) Error(string, string)                                  {}
-func (noopMetrics) ObserveCodec(string, string, time.Duration)            {}
+func (noopMetrics) Hit(string, string)                         {}
+func (noopMetrics) Miss(string, string)                        {}
+func (noopMetrics) ObserveSourceLoad(string, time.Duration)    {}
+func (noopMetrics) SingleflightShared(string, int)             {}
+func (noopMetrics) OversizeWrite(string)                       {}
+func (noopMetrics) Error(string, string)                       {}
+func (noopMetrics) ObserveCodec(string, string, time.Duration) {}
 
 // NoopMetrics 空实现。
 var NoopMetrics Metrics = noopMetrics{}
@@ -82,8 +82,8 @@ func NewPrometheusMetrics(reg prometheus.Registerer) Metrics {
 	return m
 }
 
-func (m *promMetrics) Hit(level, def string)   { m.hits.WithLabelValues(level, def).Inc() }
-func (m *promMetrics) Miss(level, def string)  { m.misses.WithLabelValues(level, def).Inc() }
+func (m *promMetrics) Hit(level, def string)  { m.hits.WithLabelValues(level, def).Inc() }
+func (m *promMetrics) Miss(level, def string) { m.misses.WithLabelValues(level, def).Inc() }
 func (m *promMetrics) ObserveSourceLoad(def string, d time.Duration) {
 	m.sourceLoad.WithLabelValues(def).Observe(d.Seconds())
 }

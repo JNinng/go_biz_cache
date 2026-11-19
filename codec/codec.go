@@ -21,9 +21,9 @@ type FieldCodec[F any] interface {
 
 type jsonSerializer struct{}
 
-func (jsonSerializer) Marshal(v any) ([]byte, error)          { return json.Marshal(v) }
-func (jsonSerializer) Unmarshal(data []byte, v any) error     { return json.Unmarshal(data, v) }
-func (jsonSerializer) Name() string                           { return "json" }
+func (jsonSerializer) Marshal(v any) ([]byte, error)      { return json.Marshal(v) }
+func (jsonSerializer) Unmarshal(data []byte, v any) error { return json.Unmarshal(data, v) }
+func (jsonSerializer) Name() string                       { return "json" }
 
 // JSON 默认 JSON 序列化器。
 var JSON Serializer = jsonSerializer{}

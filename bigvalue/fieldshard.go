@@ -18,7 +18,7 @@ func FNV1a(b []byte) uint64 {
 	return h
 }
 
-// FieldShardIndex 成员 → 子 key 分片下标：hasher(member) % shardCount。
+// FieldShardIndex 成员 → 子 key 分片下标：hasher(member) % shardCount；hasher 为 nil 时默认 FNV1a。
 func FieldShardIndex(member []byte, shardCount int, hasher Hasher) int {
 	if hasher == nil {
 		hasher = FNV1a

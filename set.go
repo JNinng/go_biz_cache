@@ -333,7 +333,7 @@ func (h *TypedSetCache[K, M]) membersViaLoader(ctx context.Context, key K, biz, 
 	return res.val, err
 }
 
-// loadAll 整 key 回源重建：回源前 DEL 子键再写避免残留；空集合同样回填 L1（"[]"，后续读不再回源）。
+// loadAll 整 key 回源重建：回源前 DEL 子键再写避免残留；空集合同样回填 L1（后续读命中空值不再回源）。
 func (h *TypedSetCache[K, M]) loadAll(ctx context.Context, key K, biz, phys string) ([]M, error) {
 	c := h.core
 	if h.loader == nil {

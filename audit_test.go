@@ -120,7 +120,7 @@ func TestHashDegrade(t *testing.T) {
 		t.Fatalf("HGet StaleL1 cold = %v", err)
 	}
 
-	// SourceOnly：L1 命中 + 冷数据走回源
+	// SourceOnly：冷数据走回源
 	Reset()
 	fs3 := newFlakyStore()
 	h3 := newTestHash(fs3, loader, func(d *Definition[hashProfile], o *HashOptions[string, hashProfile]) {

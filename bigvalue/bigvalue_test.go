@@ -122,7 +122,7 @@ func TestFieldShardIndex(t *testing.T) {
 	if FNV1a(nil) != 14695981039346656037 {
 		t.Fatalf("FNV1a(nil) = %d", FNV1a(nil))
 	}
-	// 分布冒烟：100 个成员覆盖多数分片
+	// 分布冒烟：100 个成员至少命中 4/8 个分片
 	seen := map[int]bool{}
 	for i := 0; i < 100; i++ {
 		seen[FieldShardIndex([]byte(string(rune('a'+i%26))+string(rune('a'+i/26))), 8, nil)] = true

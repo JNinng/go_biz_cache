@@ -131,7 +131,7 @@ func (m *MemStore) Incr(ctx context.Context, key string) (int64, error) {
 		var perr error
 		cur, perr = strconv.ParseInt(string(v.data), 10, 64)
 		if perr != nil {
-			// 语义对齐 redis WRONGTYPE：非整数值不可递增
+			// 对齐 redis INCR 语义：值为非整数时报错
 			return 0, errNotNumber
 		}
 	}
@@ -515,7 +515,7 @@ func (m *MemStore) ZRangeWithScores(ctx context.Context, key string, start, stop
 
 var errBadBound = errors.New("l2: bad zrangebyscore bound")
 
-// errNotNumber 语义对齐 redis WRONGTYPE：对非整数值执行 INCR。
+// errNotNumber 对齐 redis INCR 语义：值为非整数时报错。
 var errNotNumber = errors.New("l2: value is not a number")
 
 // parseZBound 解析 ZRANGEBYSCORE 边界：-inf/+inf、"(x" 开区间、"x" 闭区间。

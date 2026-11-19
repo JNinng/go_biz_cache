@@ -419,7 +419,7 @@ func (h *TypedHashCache[K, F, V]) HSet(ctx context.Context, key K, field F, val 
 	return nil
 }
 
-// HSetMulti 批量写 fields：清旧负标记 → 按子 key 分组 HMSet → 更新本实例 L1 → 一次广播 Updated。
+// HSetMulti 批量写 fields：逐 field 编码并更新本实例 L1 → 清旧负标记 → 按子 key 分组 HMSet → 一次广播 Updated。
 func (h *TypedHashCache[K, F, V]) HSetMulti(ctx context.Context, key K, fields map[F]V) error {
 	if len(fields) == 0 {
 		return nil

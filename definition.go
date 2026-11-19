@@ -65,10 +65,10 @@ func FieldCodecMap[F comparable](enc map[F]string, dec map[string]F) FieldCodec[
 type BigValueType uint8
 
 const (
-	BigValueNone      BigValueType = iota // 无策略（零值默认）
-	BigValueZstd                          // 压缩（通用）
-	BigValueShard                         // 内容切分（仅 Object 单个大值）
-	BigValueFieldShard                    // 成员哈希分片（仅 Hash/Set 大集合）
+	BigValueNone       BigValueType = iota // 无策略（零值默认）
+	BigValueZstd                           // 压缩（通用）
+	BigValueShard                          // 内容切分（仅 Object 单个大值）
+	BigValueFieldShard                     // 成员哈希分片（仅 Hash/Set 大集合）
 )
 
 // ZstdOptions 压缩策略参数。

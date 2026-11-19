@@ -63,7 +63,7 @@ func TestLRUEviction(t *testing.T) {
 		t.Fatalf("Size must be bounded by maxEntries, got %d", c.Size())
 	}
 	for i := 0; i < total; i++ {
-		if _, ok := c.Get(string(rune('a'+i))); !ok {
+		if _, ok := c.Get(string(rune('a' + i))); !ok {
 			misses++
 		}
 	}

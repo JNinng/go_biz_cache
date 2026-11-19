@@ -23,7 +23,6 @@ func TestMemStoreStrings(t *testing.T) {
 	if err != nil || len(got) != 2 {
 		t.Fatalf("MGet = %v,%v", got, err)
 	}
-	// Incr 保留 TTL
 	n, err := s.Incr(ctx, "ctr")
 	if err != nil || n != 1 {
 		t.Fatalf("Incr = %d,%v", n, err)
@@ -32,7 +31,6 @@ func TestMemStoreStrings(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("Incr again = %d", n)
 	}
-	// Del 跨类型删除
 	if err := s.Del(ctx, "a"); err != nil {
 		t.Fatalf("Del: %v", err)
 	}
@@ -63,7 +61,6 @@ func TestMemStoreHash(t *testing.T) {
 	if err := s.HMSet(ctx, "h", map[string][]byte{"f1": []byte("1"), "f2": []byte("2")}, time.Minute, false); err != nil {
 		t.Fatalf("HMSet: %v", err)
 	}
-	// ExpireNX 语义：refresh=false 且已有 TTL → 不续期
 	if err := s.HMSet(ctx, "h", map[string][]byte{"f3": []byte("3")}, time.Minute, false); err != nil {
 		t.Fatalf("HMSet: %v", err)
 	}

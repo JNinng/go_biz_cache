@@ -1,4 +1,4 @@
-// Package l2 提供 L2 缓存的 Redis 抽象：单机/集群统一（go-redis 客户端经提供者注入，§9.1），
+// Package l2 提供 L2 缓存的 Redis 抽象：单机/集群统一（go-redis 客户端经提供者注入，docs/design.md §9.1），
 // 以及测试用内存实现（MemStore）。批量操作由实现内部 pipeline / 分组。
 //
 // Redis 服务端要求 ≥ 7.0：TTL 语义依赖 EXPIRE ... NX 选项（Redis 7.0 引入）。

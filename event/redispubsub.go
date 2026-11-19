@@ -17,7 +17,7 @@ const (
 
 // RedisPubSub 基于 Redis Pub/Sub 的跨实例事件总线适配器。
 //
-// 客户端经提供者函数注入（§9.1）：每次发布原子获取当前客户端；检测到实例变更后
+// 客户端经提供者函数注入（docs/design.md §9.1）：每次发布原子获取当前客户端；检测到实例变更后
 // 以新实例重建订阅（PSubscribe gocache:evt:*）。重建窗口内丢失的事件由世代号
 // 短 TTL 惰性刷新兜底。提供者应返回指针类型客户端以便实例变更比较。
 type RedisPubSub struct {

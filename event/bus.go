@@ -25,8 +25,8 @@ type Event struct {
 	Type      Type     `json:"type"`
 	Namespace string   `json:"ns,omitempty"`
 	DefName   string   `json:"def,omitempty"`
-	Keys      []string `json:"keys,omitempty"` // Updated/Invalidated: 变换后物理 key（不含分片子 key）
-	Gen       int64    `json:"gen,omitempty"`  // GenerationBumped: 新世代号
+	Keys      []string `json:"keys,omitempty"`     // Updated/Invalidated: 变换后物理 key（不含分片子 key）
+	Gen       int64    `json:"gen,omitempty"`      // GenerationBumped: 新世代号
 	Instance  string   `json:"instance,omitempty"` // 发布者实例 ID（订阅方过滤自身事件）
 }
 

@@ -87,7 +87,7 @@ func TestObjectNegativeCache(t *testing.T) {
 	if _, err := store.Get(ctx, "test:users:v0:t:acme:u:ghost:__neg"); err != nil {
 		t.Fatalf("neg marker missing: %v", err)
 	}
-	// Set 后负标记清除、可读新值
+	// Set 后可读新值
 	want := userProfile{ID: "ghost", Name: "now", Age: 1}
 	if err := h.Set(ctx, "t:acme:u:ghost", want); err != nil {
 		t.Fatalf("Set: %v", err)
@@ -166,7 +166,7 @@ func TestObjectMultiGet(t *testing.T) {
 	if last[0] != "t:acme:u:2" || last[1] != "t:acme:u:3" {
 		t.Fatalf("batch loader keys = %v", last)
 	}
-	// 全 L1 命中路径
+	// 清 L1 后 L2 命中路径：仍不回源
 	h.core.l1.Clear()
 	got2, err := h.MultiGet(ctx, "t:acme:u:2", "t:acme:u:3")
 	if err != nil || len(got2) != 2 {

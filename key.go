@@ -131,11 +131,11 @@ func extractParts(template, bizKey string) (map[string]string, error) {
 type TagKind uint8
 
 const (
-	TagNone  TagKind = iota // 不变换（默认整键散列）
-	TagWrap                 // 将 At 定位的子串原地包上 {}（At 空 = 整键包裹）
-	TagPrefix               // 头部注入 Value（可含自闭合 {...}）
-	TagSuffix               // 尾部注入 Value（可含自闭合 {...}）
-	TagInsert               // 于 At 匹配处之前注入 Value（At 空 = 头部）
+	TagNone   TagKind = iota // 不变换（默认整键散列）
+	TagWrap                  // 将 At 定位的子串原地包上 {}（At 空 = 整键包裹）
+	TagPrefix                // 头部注入 Value（可含自闭合 {...}）
+	TagSuffix                // 尾部注入 Value（可含自闭合 {...}）
+	TagInsert                // 于 At 匹配处之前注入 Value（At 空 = 头部）
 )
 
 // TagInput key 变换入参。
@@ -145,7 +145,7 @@ type TagInput struct {
 	NS, Name   string            // 命名空间/定义名
 }
 
-// TagOp key 变换操作（单 op；契约见 docs §3.3）。
+// TagOp key 变换操作（单 op；契约见 docs/design.md §3.3）。
 type TagOp struct {
 	Kind  TagKind
 	Value string // Prefix/Suffix/Insert 的注入内容（可含自闭合 {...}）；Wrap 忽略
@@ -205,6 +205,7 @@ func checkBraces(s, what string) error {
 	return nil
 }
 
+// checkAt 校验定位子串 At：不得含空白与大括号。
 func checkAt(at string) error {
 	if hasWhitespace(at) {
 		return fmt.Errorf("%w: tag At %q contains whitespace", ErrKeyBuild, at)

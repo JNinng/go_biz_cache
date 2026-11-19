@@ -62,7 +62,7 @@ func TestExtractParts(t *testing.T) {
 	}
 }
 
-// ---------- §3.3 Tag 变换走查 ----------
+// ---------- Tag 变换走查（docs/design.md §3.3）----------
 
 func TestApplyTagWalkthrough(t *testing.T) {
 	const logical = "biz:user_profile:v3:t:acme:u:10001"
@@ -121,10 +121,10 @@ func TestApplyTagContractErrors(t *testing.T) {
 
 func TestInverseTag(t *testing.T) {
 	cases := []struct {
-		name  string
-		op    TagOp
-		phys  string
-		want  string
+		name   string
+		op     TagOp
+		phys   string
+		want   string
 		wantOK bool
 	}{
 		{"none", TagOp{Kind: TagNone}, "a:b", "a:b", true},

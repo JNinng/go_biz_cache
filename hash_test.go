@@ -21,8 +21,8 @@ func newTestHash(store l2.Store, loader HashLoader[string, string, hashProfile],
 		KeyTemplate:   "{k}",
 		TTL:           30 * time.Minute,
 		NegativeCache: true,
-		L1:          L1Options{Enabled: true, Size: 1024},
-		L2:          L2Options{Enabled: true, Store: store},
+		L1:            L1Options{Enabled: true, Size: 1024},
+		L2:            L2Options{Enabled: true, Store: store},
 	}
 	opts := HashOptions[string, hashProfile]{HashLoader: loader}
 	if mutate != nil {
@@ -241,7 +241,7 @@ func TestHashFieldShard(t *testing.T) {
 	ctx := context.Background()
 	phys := "test:hobjs:v0:big"
 
-	// 每个字段落到自己的子 key
+	// 各字段按分片索引落入子 key :h0..:h3
 	for _, f := range []string{"f0", "f1", "f2", "f3", "f4"} {
 		if err := h.HSet(ctx, "big", f, hashProfile{Name: f}); err != nil {
 			t.Fatalf("HSet %s: %v", f, err)
@@ -303,7 +303,7 @@ func TestHashFieldCodec(t *testing.T) {
 	}
 }
 
-// RefreshTTLOnWrite 接线：句柄必须把定义开关透传给 Store.HMSet 的 refresh 实参。
+// RefreshTTLOnWrite 接线：句柄必须把该开关透传给 Store.HMSet 的 refresh 实参。
 func TestHashHMSetTTLRefresh(t *testing.T) {
 	Reset()
 	defer Reset()

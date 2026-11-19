@@ -7,7 +7,7 @@ import (
 
 // ---------- 句柄共享设施 ----------
 
-// keyString 业务键归一：K 在 v1 恒为 string（模板展开后的业务键），句柄方法入参即业务键。
+// keyString 业务键归一（模板展开后的业务键，句柄方法入参即业务键）；导出句柄均固定 K = string，非 string 键经 fmt.Sprint 归一。
 func keyString[K comparable](k K) string {
 	if s, ok := any(k).(string); ok {
 		return s
@@ -15,7 +15,7 @@ func keyString[K comparable](k K) string {
 	return fmt.Sprint(k)
 }
 
-// keyOf 业务键 → K（keyString 的逆，v1 仅支持 K = string）。
+// keyOf 业务键 → K（keyString 的逆；仅支持 K = string，其余类型返回零值）。
 func keyOf[K comparable](biz string) K {
 	var zero K
 	if p, ok := any(&zero).(*string); ok {
@@ -34,7 +34,7 @@ const (
 	// l1FieldSep hash L1 复合键分隔符：业务键+\x1f+fieldEnc（\x1f 为控制字符，约定 field 编码与业务键不含该字符）。
 	l1FieldSep = "\x1f"
 
-	sfLoadPrefix    = "load:"    // object/hash/set/list/zset 回源 singleflight
+	sfLoadPrefix    = "load:"    // object/hash/set/zset 回源 singleflight
 	sfRefreshPrefix = "refresh:" // object Refresh
 )
 
@@ -42,7 +42,7 @@ const (
 var negMarker = []byte{1}
 
 // loadBatch 批量回源协调器：同批次 pending 条目由首个到手的 leader 一次批量加载
-//（批量契约，不循环单查），其余条目等待共享结果；跨调用同条目并发经外部 singleflight 合并。
+// （批量契约，不循环单查），其余条目等待共享结果；跨调用同条目并发经外部 singleflight 合并。
 type loadBatch[V any] struct {
 	mu      sync.Mutex
 	wg      sync.WaitGroup

@@ -87,8 +87,7 @@ func TestIntegrationRedisObject(t *testing.T) {
 	if err != nil || got.Name != "alice" {
 		t.Fatalf("Get = %v,%v", got, err)
 	}
-	// 清 L1 后 L2 命中
-	// L1 默认未启用（L1Options 零值），Get 直接走 L2
+	// L1 未启用（L1Options 零值），Get 直接命中 L2
 	if got, err = h.Get(ctx, "u:1"); err != nil || got.Name != "alice" || loads != 0 {
 		t.Fatalf("Get via redis = %v,%v loads=%d", got, err, loads)
 	}

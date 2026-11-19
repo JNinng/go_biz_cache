@@ -7,7 +7,7 @@ import (
 
 const lruShards = 16
 
-const sweepInterval = 1024 // 每隔 N 次 Set 做一次过期清扫
+const sweepInterval = 1024 // 每 shard 每隔 1024 次 Set 触发一次过期清扫
 
 func fnv32(s string) uint32 {
 	h := uint32(2166136261)

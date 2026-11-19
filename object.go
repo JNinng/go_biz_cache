@@ -9,7 +9,7 @@ import (
 	"github.com/jninng/go_biz_cache/event"
 )
 
-// TypedObjectCache 强类型对象缓存句柄（redis string 结构整值存取；K 在 v1 恒为 string）。
+// TypedObjectCache 强类型对象缓存句柄（redis string 结构整值存取；K 恒为 string）。
 // 读取路径：L1（nil 值 = 负缓存）→ L2（负标记 / Shard 拼接）→ 降级策略 → singleflight 回源。
 type TypedObjectCache[K comparable, V any] struct {
 	core   *defCore
@@ -57,6 +57,7 @@ func (h *TypedObjectCache[K, V]) Get(ctx context.Context, key K) (V, error) {
 	return v, nil
 }
 
+// fetch Get 的多级读取路径；ok=false 表示缺失（负缓存命中 / 回源未命中 / StaleL1 降级），err 非 nil 为硬错误。
 func (h *TypedObjectCache[K, V]) fetch(ctx context.Context, key K, biz string) (V, bool, error) {
 	c := h.core
 	var zero V
